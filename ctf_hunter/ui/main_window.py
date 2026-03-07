@@ -231,6 +231,11 @@ class MainWindow(QMainWindow):
         add_btn.setToolTip("Add files")
         add_btn.clicked.connect(self._add_files)
         left_hdr.addWidget(add_btn)
+        add_folder_btn = QPushButton("📂")
+        add_folder_btn.setFixedWidth(32)
+        add_folder_btn.setToolTip("Add folder (recursively)")
+        add_folder_btn.clicked.connect(self._add_folder)
+        left_hdr.addWidget(add_folder_btn)
         clear_btn = QPushButton("✕")
         clear_btn.setFixedWidth(28)
         clear_btn.setToolTip("Clear all files")
@@ -294,6 +299,18 @@ class MainWindow(QMainWindow):
         )
         for p in paths:
             self._add_file(p)
+
+    def _add_folder(self) -> None:
+        directory = QFileDialog.getExistingDirectory(self, "Add Folder")
+        if not directory:
+            return
+        self._add_directory_files(directory)
+
+    def _add_directory_files(self, directory: str) -> None:
+        """Recursively add all files found under *directory*."""
+        for file_path in Path(directory).rglob("*"):
+            if file_path.is_file():
+                self._add_file(str(file_path))
 
     def _add_file(self, path: str) -> None:
         if path in self._session.files:
@@ -679,8 +696,13 @@ class MainWindow(QMainWindow):
     def dropEvent(self, event: QDropEvent) -> None:
         for url in event.mimeData().urls():
             path = url.toLocalFile()
-            if path and Path(path).is_file():
-                self._add_file(path)
+            if not path:
+                continue
+            p = Path(path)
+            if p.is_file():
+                self._add_file(str(p))
+            elif p.is_dir():
+                self._add_directory_files(str(p))
 
     # ------------------------------------------------------------------
     # Cleanup
