@@ -14,7 +14,7 @@ import struct
 import zlib
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import List, NamedTuple, Optional, Set, Tuple
 
 from core.report import Finding
 from core.ai_client import AIClient
@@ -59,6 +59,16 @@ _HEX_RE = re.compile(rb"[0-9a-fA-F]{12,}")
 
 # UPX magic marker
 _UPX_MAGIC = b"UPX!"
+
+# ELF section header sizes (bytes)
+_ELF32_SHDR_SIZE = 40
+_ELF64_SHDR_SIZE = 64
+
+# Maximum sections to parse per binary (prevents pathological inputs)
+_MAX_SECTIONS_PARSED = 64
+
+# CodeView debug info header: 4-byte signature + 16-byte GUID + 4-byte age
+_CODEVIEW_HEADER_SIZE = 24
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +264,7 @@ class BinaryAnalyzer(Analyzer):
                 e_shentsize = struct.unpack_from(f"{end}H", data, 46)[0]
                 e_shnum = struct.unpack_from(f"{end}H", data, 48)[0]
                 e_shstrndx = struct.unpack_from(f"{end}H", data, 50)[0]
-                hdr_size = 40
+                hdr_size = _ELF32_SHDR_SIZE
 
                 def _sh32(i: int) -> Optional[Tuple[int, int, int, int]]:
                     off = e_shoff + i * e_shentsize
@@ -273,7 +283,7 @@ class BinaryAnalyzer(Analyzer):
                 e_shentsize = struct.unpack_from(f"{end}H", data, 58)[0]
                 e_shnum = struct.unpack_from(f"{end}H", data, 60)[0]
                 e_shstrndx = struct.unpack_from(f"{end}H", data, 62)[0]
-                hdr_size = 64
+                hdr_size = _ELF64_SHDR_SIZE
 
                 def _sh64(i: int) -> Optional[Tuple[int, int, int, int]]:
                     off = e_shoff + i * e_shentsize
@@ -298,7 +308,7 @@ class BinaryAnalyzer(Analyzer):
                     if soff + ssz <= len(data):
                         shstrtab = data[soff:soff + ssz]
 
-            for i in range(min(e_shnum, 64)):
+            for i in range(min(e_shnum, _MAX_SECTIONS_PARSED)):
                 hdr = get_sh(i)
                 if not hdr:
                     break
@@ -335,7 +345,7 @@ class BinaryAnalyzer(Analyzer):
             num_sections = struct.unpack_from("<H", data, pe_offset + 6)[0]
             opt_header_size = struct.unpack_from("<H", data, pe_offset + 20)[0]
             section_table_offset = pe_offset + 24 + opt_header_size
-            for i in range(min(num_sections, 64)):
+            for i in range(min(num_sections, _MAX_SECTIONS_PARSED)):
                 sec_off = section_table_offset + i * 40
                 if sec_off + 40 > len(data):
                     break
@@ -754,7 +764,7 @@ class BinaryAnalyzer(Analyzer):
             opt_header_size = struct.unpack_from("<H", data, pe_offset + 20)[0]
             section_table_offset = pe_offset + 24 + opt_header_size
             sections_raw: List[Tuple[int, int, int]] = []
-            for i in range(min(num_sections, 64)):
+            for i in range(min(num_sections, _MAX_SECTIONS_PARSED)):
                 sec_off = section_table_offset + i * 40
                 if sec_off + 40 > len(data):
                     break
@@ -794,7 +804,7 @@ class BinaryAnalyzer(Analyzer):
                                 if cv_end <= len(data):
                                     cv_data = data[dbg_ptr:cv_end]
                                     # Skip 4-byte signature + 16-byte GUID + 4-byte age
-                                    pdb_path_start = 24 if len(cv_data) > 24 else 0
+                                    pdb_path_start = _CODEVIEW_HEADER_SIZE if len(cv_data) > _CODEVIEW_HEADER_SIZE else 0
                                     pdb_null = cv_data.find(b"\x00", pdb_path_start)
                                     pdb_end = pdb_null if pdb_null != -1 else len(cv_data)
                                     pdb_path = cv_data[pdb_path_start:pdb_end].decode(
