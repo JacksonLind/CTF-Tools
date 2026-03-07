@@ -330,6 +330,7 @@ class MainWindow(QMainWindow):
         self._findings_by_file.clear()
         self._progress_by_file.clear()
         self._file_list.clear()
+        self._diff_first_file = None  # reset pending diff selection
         self._result_panel.show_findings("", [])
         self._hex_viewer.load_bytes(b"", "")
         self._flag_summary.refresh([])
@@ -349,7 +350,12 @@ class MainWindow(QMainWindow):
         path = item.data(Qt.ItemDataRole.UserRole)
         menu = QMenu(self)
         analyze_act = menu.addAction("Analyze This File")
-        diff_act = menu.addAction("Diff with…")
+        if self._diff_first_file is None:
+            diff_act = menu.addAction("Diff with…  (set as File A)")
+            cancel_diff_act = None
+        else:
+            diff_act = menu.addAction(f"Diff with '{Path(self._diff_first_file).name}'")
+            cancel_diff_act = menu.addAction("Cancel Diff")
         steg_act = menu.addAction("Open in Steg Viewer")
         remove_act = menu.addAction("Remove")
 
@@ -359,11 +365,16 @@ class MainWindow(QMainWindow):
         elif action == diff_act:
             if self._diff_first_file is None:
                 self._diff_first_file = path
-                QMessageBox.information(self, "Diff", f"File A set: {path}\nNow right-click another file and choose 'Diff with…'")
+                QMessageBox.information(
+                    self, "Diff",
+                    f"File A set: {path}\nRight-click another file and choose 'Diff with…' to compare."
+                )
             else:
                 dlg = DiffViewWindow(self._diff_first_file, path, self)
                 dlg.exec()
                 self._diff_first_file = None
+        elif cancel_diff_act and action == cancel_diff_act:
+            self._diff_first_file = None
         elif action == steg_act:
             self._steg_viewer.load_image(path)
             self._tabs.setCurrentIndex(2)
@@ -374,6 +385,9 @@ class MainWindow(QMainWindow):
                 self._session.files.remove(path)
             self._findings_by_file.pop(path, None)
             self._progress_by_file.pop(path, None)
+            # Clear diff state if the removed file was the diff selection
+            if self._diff_first_file == path:
+                self._diff_first_file = None
 
     def _on_file_selected(self, current, previous) -> None:
         if previous and previous.data(Qt.ItemDataRole.UserRole):

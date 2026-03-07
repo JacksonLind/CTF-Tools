@@ -131,7 +131,10 @@ class ArchiveAnalyzer(Analyzer):
         words: list[str] = []
         if _WORDLIST_PATH.exists():
             try:
-                words = _WORDLIST_PATH.read_text(errors="replace").splitlines()
+                words = [
+                    w for w in _WORDLIST_PATH.read_text(errors="replace").splitlines()
+                    if w.strip()
+                ]
             except Exception:
                 pass
         return words or ["password", "123456", "admin", "secret", "flag"]
@@ -156,20 +159,22 @@ class ArchiveAnalyzer(Analyzer):
         flag_pattern: re.Pattern,
         ai_client: Optional[AIClient],
     ) -> List[Finding]:
+        import tempfile
         findings: List[Finding] = []
         for info in zf.infolist():
             if info.filename.lower().endswith((".zip", ".gz", ".tar")):
                 try:
                     data = zf.read(info.filename)
-                    tmp = Path("/tmp") / info.filename.replace("/", "_")
-                    tmp.write_bytes(data)
-                    # Recurse
+                    # Use a secure temp file (cross-platform, no path traversal)
+                    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp_fh:
+                        tmp_fh.write(data)
+                        tmp_path = tmp_fh.name
                     nested_analyzer = ArchiveAnalyzer()
-                    nested = nested_analyzer.analyze(str(tmp), flag_pattern, "fast", ai_client)
+                    nested = nested_analyzer.analyze(tmp_path, flag_pattern, "fast", ai_client)
                     for f in nested:
                         f.title = f"[nested:{info.filename}] " + f.title
                     findings.extend(nested)
-                    tmp.unlink(missing_ok=True)
+                    Path(tmp_path).unlink(missing_ok=True)
                 except Exception:
                     pass
         return findings
