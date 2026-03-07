@@ -14,6 +14,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont, QColor
 
 from core.report import Finding
+from ui.tool_suggester_panel import SuggestedToolsPanel
 
 _SEVERITY_COLORS = {
     "HIGH":   ("#cc0000", "#ffeeee"),
@@ -76,6 +77,11 @@ class ResultPanel(QWidget):
         self._ai_output.setPlaceholderText("AI analysis output will appear here…")
         layout.addWidget(self._ai_output)
 
+        # Suggested Tools panel
+        self._tool_suggester = SuggestedToolsPanel()
+        self._tool_suggester.setMaximumHeight(200)
+        layout.addWidget(self._tool_suggester)
+
     def set_ai_client(self, ai_client) -> None:
         self._ai_client = ai_client
         enabled = ai_client is not None and ai_client.available
@@ -110,6 +116,8 @@ class ResultPanel(QWidget):
                 item.setFont(2, QFont("", -1, QFont.Weight.Bold))
             item.setData(0, Qt.ItemDataRole.UserRole, f)
             self._tree.addTopLevelItem(item)
+
+        self._tool_suggester.refresh(findings)
 
     def _on_selection(self) -> None:
         items = self._tree.selectedItems()
