@@ -312,6 +312,8 @@ class NetworkConsoleTab(QWidget):
                     ctx = ssl.create_default_context()
                     ctx.check_hostname = False
                     ctx.verify_mode = ssl.CERT_NONE
+                    # Enforce at least TLSv1.2 to avoid insecure protocol versions
+                    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
                     sock = ctx.wrap_socket(raw_sock, server_hostname=host)
                 else:
                     sock = raw_sock
