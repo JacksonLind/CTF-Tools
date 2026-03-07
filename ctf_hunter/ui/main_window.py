@@ -38,6 +38,7 @@ from ui.diff_view import DiffViewWindow
 from ui.flag_summary import FlagSummaryTab
 from ui.steg_viewer import StegViewerTab
 from ui.file_intel import FileIntelTab
+from ui.challenge_panel import ChallengePanelTab
 from ui.settings_dialog import SettingsDialog, load_config
 from ui.session import save_session_dialog, load_session_dialog
 
@@ -291,6 +292,10 @@ class MainWindow(QMainWindow):
         self._file_intel = FileIntelTab()
         tabs.addTab(self._file_intel, "🔑 File Intel")
 
+        # --- Tab 5: Challenge ---
+        self._challenge_panel = ChallengePanelTab(ai_client=self._ai_client)
+        tabs.addTab(self._challenge_panel, "🎯 Challenge")
+
         self.setCentralWidget(tabs)
         self._tabs = tabs
 
@@ -356,6 +361,7 @@ class MainWindow(QMainWindow):
         self._result_panel.show_findings("", [])
         self._hex_viewer.load_bytes(b"", "")
         self._flag_summary.refresh([])
+        self._challenge_panel.update_findings([])
 
     def _severity_badge_for_file(self, path: str) -> str:
         findings = self._findings_by_file.get(path, [])
@@ -493,6 +499,7 @@ class MainWindow(QMainWindow):
         # Refresh flag summary
         all_findings = [f for flist in self._findings_by_file.values() for f in flist]
         self._flag_summary.refresh(all_findings)
+        self._challenge_panel.update_findings(all_findings)
 
     def _on_analysis_error(self, path: str, msg: str) -> None:
         if pb := self._progress_by_file.get(path):
@@ -564,6 +571,7 @@ class MainWindow(QMainWindow):
 
         self._notes_by_file = dict(session.notes)
         self._flag_summary.refresh(session.findings)
+        self._challenge_panel.update_findings(session.findings)
 
     # ------------------------------------------------------------------
     # Watchfolder
@@ -690,6 +698,7 @@ class MainWindow(QMainWindow):
             self._ai_client.set_api_key(api_key)
             self._result_panel.set_ai_client(self._ai_client)
             self._flag_summary.set_ai_client(self._ai_client)
+            self._challenge_panel.set_ai_client(self._ai_client)
 
     # ------------------------------------------------------------------
     # Drag and drop

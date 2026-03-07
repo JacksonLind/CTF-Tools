@@ -16,6 +16,10 @@ except ImportError:
 
 MODEL = "claude-sonnet-4-20250514"
 MAX_TOKENS = 1024
+# Maximum characters of description / findings included in a single prompt
+# to stay comfortably within the model's context window.
+_MAX_DESCRIPTION_LENGTH = 3000
+_MAX_FINDINGS_LENGTH = 3000
 
 
 class AIClient:
@@ -90,5 +94,27 @@ class AIClient:
             "in a CTF challenge session. Identify the most promising lead and explain "
             "step-by-step what to investigate first.\n\n"
             f"All findings:\n{all_findings_summary[:6000]}"
+        )
+        return self._ask(prompt)
+
+    def parse_challenge_description(
+        self,
+        description: str,
+        findings: str,
+    ) -> str:
+        """Return a prioritized attack plan derived from a CTF challenge description."""
+        prompt = (
+            "You are an expert CTF (Capture the Flag) competition analyst. "
+            "Analyze the following challenge description and current file analysis findings.\n\n"
+            "Your task:\n"
+            "1. Extract all implied techniques and file types from the description\n"
+            "2. Identify keywords suggesting specific steganography, cryptography, "
+            "or forensics methods\n"
+            "3. Flag any likely rabbit holes (misleading clues) and explain why\n"
+            "4. Produce a numbered, prioritized attack plan\n"
+            "5. Suggest which files to analyze first and why\n\n"
+            f"Challenge description:\n{description[:_MAX_DESCRIPTION_LENGTH]}\n\n"
+            f"Current file findings:\n{findings[:_MAX_FINDINGS_LENGTH]}\n\n"
+            "Respond with a concise, actionable attack plan."
         )
         return self._ask(prompt)
