@@ -41,6 +41,8 @@ from ui.file_intel import FileIntelTab
 from ui.challenge_panel import ChallengePanelTab
 from ui.settings_dialog import SettingsDialog, load_config
 from ui.session import save_session_dialog, load_session_dialog
+from ui.network_console import NetworkConsoleTab
+from ui.timeline_tab import TimelineTab
 
 # ---------------------------------------------------------------------------
 # Worker signals / runnable
@@ -296,6 +298,15 @@ class MainWindow(QMainWindow):
         self._challenge_panel = ChallengePanelTab(ai_client=self._ai_client)
         tabs.addTab(self._challenge_panel, "🎯 Challenge")
 
+        # --- Tab 6: Timeline ---
+        self._timeline_tab = TimelineTab()
+        tabs.addTab(self._timeline_tab, "🕒 Timeline")
+
+        # --- Tab 7: Network ---
+        self._network_console = NetworkConsoleTab(session=self._session)
+        self._network_console.flag_detected.connect(self._on_network_flag_detected)
+        tabs.addTab(self._network_console, "🌐 Network")
+
         self.setCentralWidget(tabs)
         self._tabs = tabs
 
@@ -362,6 +373,7 @@ class MainWindow(QMainWindow):
         self._hex_viewer.load_bytes(b"", "")
         self._flag_summary.refresh([])
         self._challenge_panel.update_findings([])
+        self._timeline_tab.refresh([])
 
     def _severity_badge_for_file(self, path: str) -> str:
         findings = self._findings_by_file.get(path, [])
@@ -500,6 +512,7 @@ class MainWindow(QMainWindow):
         all_findings = [f for flist in self._findings_by_file.values() for f in flist]
         self._flag_summary.refresh(all_findings)
         self._challenge_panel.update_findings(all_findings)
+        self._timeline_tab.refresh(all_findings)
 
     def _on_analysis_error(self, path: str, msg: str) -> None:
         if pb := self._progress_by_file.get(path):
@@ -572,10 +585,31 @@ class MainWindow(QMainWindow):
         self._notes_by_file = dict(session.notes)
         self._flag_summary.refresh(session.findings)
         self._challenge_panel.update_findings(session.findings)
+        self._timeline_tab.refresh(session.findings)
+        self._network_console.set_session(session)
 
     # ------------------------------------------------------------------
-    # Watchfolder
+    # Network tab
     # ------------------------------------------------------------------
+
+    def _on_network_flag_detected(self, context: str, flag_text: str) -> None:
+        """Called when the network console auto-detects a flag pattern."""
+        from core.report import Finding
+        f = Finding(
+            file=f"network://{context}",
+            analyzer="NetworkConsoleTab",
+            title="Flag pattern detected in network data",
+            severity="HIGH",
+            detail=flag_text[:500],
+            flag_match=True,
+            confidence=0.90,
+        )
+        # Add to the flag summary
+        self._session.findings.append(f)
+        all_findings = list(self._session.findings)
+        self._flag_summary.refresh(all_findings)
+        # Switch to flag summary tab
+        self._tabs.setCurrentIndex(1)  # Flag Summary is tab index 1
 
     def _toggle_watchfolder(self, checked: bool) -> None:
         if checked:

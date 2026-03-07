@@ -27,17 +27,20 @@ from analyzers.pcap import PcapAnalyzer
 from analyzers.filesystem import FilesystemAnalyzer
 from analyzers.database import DatabaseAnalyzer
 from analyzers.disassembly import DisassemblyAnalyzer
+from analyzers.classical_cipher import ClassicalCipherAnalyzer
+from analyzers.forensics_timeline import ForensicsTimelineAnalyzer
+from analyzers.image_format import ImageFormatAnalyzer
 
 # ---------------------------------------------------------------------------
 # Magic byte signatures mapped to analyzer keys
 # ---------------------------------------------------------------------------
 
 _MAGIC_MAP: list[tuple[bytes, list[str]]] = [
-    (b"\x89PNG\r\n\x1a\n",    ["image", "steganalysis"]),
-    (b"\xff\xd8\xff",          ["image", "steganalysis"]),
-    (b"GIF87a",                ["image", "steganalysis"]),
-    (b"GIF89a",                ["image", "steganalysis"]),
-    (b"BM",                    ["image", "steganalysis"]),
+    (b"\x89PNG\r\n\x1a\n",    ["image", "steganalysis", "image_format"]),
+    (b"\xff\xd8\xff",          ["image", "steganalysis", "image_format"]),
+    (b"GIF87a",                ["image", "steganalysis", "image_format"]),
+    (b"GIF89a",                ["image", "steganalysis", "image_format"]),
+    (b"BM",                    ["image", "steganalysis", "image_format"]),
     (b"RIFF",                  ["audio"]),
     (b"ID3",                   ["audio"]),
     (b"\xff\xfb",              ["audio"]),
@@ -58,10 +61,10 @@ _MAGIC_MAP: list[tuple[bytes, list[str]]] = [
 ]
 
 _MIME_MAP: dict[str, list[str]] = {
-    "image/png":              ["image", "steganalysis"],
-    "image/jpeg":             ["image", "steganalysis"],
-    "image/gif":              ["image", "steganalysis"],
-    "image/bmp":              ["image", "steganalysis"],
+    "image/png":              ["image", "steganalysis", "image_format"],
+    "image/jpeg":             ["image", "steganalysis", "image_format"],
+    "image/gif":              ["image", "steganalysis", "image_format"],
+    "image/bmp":              ["image", "steganalysis", "image_format"],
     "image/tiff":             ["image", "steganalysis"],
     "audio/wav":              ["audio"],
     "audio/x-wav":            ["audio"],
@@ -87,18 +90,21 @@ _MIME_MAP: dict[str, list[str]] = {
 _DISK_EXTS = {".dd", ".img", ".iso", ".raw", ".dmg"}
 
 _ANALYZER_REGISTRY: dict[str, type[Analyzer]] = {
-    "image":        ImageAnalyzer,
-    "audio":        AudioAnalyzer,
-    "archive":      ArchiveAnalyzer,
-    "document":     DocumentAnalyzer,
-    "binary":       BinaryAnalyzer,
-    "steganalysis": SteganalysisAnalyzer,
-    "encoding":     EncodingAnalyzer,
-    "crypto":       CryptoAnalyzer,
-    "pcap":         PcapAnalyzer,
-    "filesystem":   FilesystemAnalyzer,
-    "database":     DatabaseAnalyzer,
-    "disassembly":  DisassemblyAnalyzer,
+    "image":           ImageAnalyzer,
+    "audio":           AudioAnalyzer,
+    "archive":         ArchiveAnalyzer,
+    "document":        DocumentAnalyzer,
+    "binary":          BinaryAnalyzer,
+    "steganalysis":    SteganalysisAnalyzer,
+    "encoding":        EncodingAnalyzer,
+    "crypto":          CryptoAnalyzer,
+    "pcap":            PcapAnalyzer,
+    "filesystem":      FilesystemAnalyzer,
+    "database":        DatabaseAnalyzer,
+    "disassembly":     DisassemblyAnalyzer,
+    "classical_cipher": ClassicalCipherAnalyzer,
+    "forensics_timeline": ForensicsTimelineAnalyzer,
+    "image_format":    ImageFormatAnalyzer,
 }
 
 
@@ -121,14 +127,14 @@ def dispatch(
     generic = GenericAnalyzer()
     all_findings.extend(generic.analyze(path, flag_pattern, depth, ai_client))
 
-    # Always run encoding and crypto
-    for key in ("encoding", "crypto"):
+    # Always run encoding, crypto, classical_cipher, and forensics_timeline
+    for key in ("encoding", "crypto", "classical_cipher", "forensics_timeline"):
         analyzer = _ANALYZER_REGISTRY[key]()
         all_findings.extend(analyzer.analyze(path, flag_pattern, depth, ai_client))
 
     # Run type-specific analyzers
     for key in keys:
-        if key in ("encoding", "crypto"):
+        if key in ("encoding", "crypto", "classical_cipher", "forensics_timeline"):
             continue   # already ran above
         cls = _ANALYZER_REGISTRY.get(key)
         if cls:
