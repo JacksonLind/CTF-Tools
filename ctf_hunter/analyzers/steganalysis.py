@@ -103,6 +103,7 @@ def _bits_to_bytes(bits: List[int]) -> bytes:
 
 
 _PHASE_CODING_WINDOW = 512  # samples per FFT window for phase coding detection
+_MIN_IMAGE_COMPLEXITY_STD = 10.0  # minimum pixel std dev to enable bit plane analysis
 
 
 def _int_to_bits(value: int, n_bits: int) -> List[int]:
@@ -367,6 +368,12 @@ class SteganalysisAnalyzer(Analyzer):
             img = Image.open(path)
             arr = np.array(img)
         except Exception:
+            return findings
+
+        # Skip bit plane analysis for uniform/solid-colour images: they always
+        # produce false positives.  Use the standard deviation of pixel values
+        # across all channels as a proxy for image complexity.
+        if float(np.std(arr.astype(float))) < _MIN_IMAGE_COMPLEXITY_STD:
             return findings
 
         if arr.ndim == 2:
@@ -689,7 +696,23 @@ class SteganalysisAnalyzer(Analyzer):
             chunk_offset = offset
             offset += 12 + length
             if chunk_type in (b"tEXt", b"zTXt", b"iTXt"):
-                flag_match, confidence, detail = decode_pipeline(chunk_data, flag_pattern)
+                if chunk_type == b"zTXt":
+                    # zTXt chunks are zlib-compressed; try decompression first
+                    # before the standard decode pipeline.
+                    data_to_decode = chunk_data
+                    try:
+                        null_pos = chunk_data.index(b"\x00")
+                        # +1 skips the null separator, +1 skips the compression
+                        # method byte (0x00 = zlib deflate).
+                        # Guard against malformed chunks that end at the null byte.
+                        if null_pos + 2 <= len(chunk_data):
+                            compressed = chunk_data[null_pos + 2:]
+                            data_to_decode = zlib.decompress(compressed)
+                    except Exception:
+                        pass
+                    flag_match, confidence, detail = decode_pipeline(data_to_decode, flag_pattern)
+                else:
+                    flag_match, confidence, detail = decode_pipeline(chunk_data, flag_pattern)
                 findings.append(self._finding(
                     path, f"PNG {chunk_type.decode()} chunk text data",
                     detail, severity="HIGH" if flag_match else "MEDIUM",

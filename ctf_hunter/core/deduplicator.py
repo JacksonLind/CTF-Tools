@@ -4,11 +4,14 @@ different analyzers; computes corroboration-boosted confidence scores.
 """
 from __future__ import annotations
 
-from typing import List
+from typing import Dict, List, Optional
 
 from .report import Finding
 
 PROXIMITY_BYTES = 16
+
+# Minimum confidence for a flag-match finding to trigger XOR suppression.
+_FLAG_MATCH_CONFIDENCE_THRESHOLD = 0.90
 
 
 def deduplicate(findings: List[Finding]) -> List[Finding]:
@@ -16,6 +19,11 @@ def deduplicate(findings: List[Finding]) -> List[Finding]:
     Group findings by file + proximity + severity.  When multiple analyzers
     flag the same region, merge them: keep the highest-confidence primary,
     mark the rest as duplicate_of, and boost confidence by corroboration.
+
+    After proximity-based deduplication a suppression pass is applied: if any
+    finding for a file has flag_match=True and confidence >= 0.90, all XOR
+    recovery findings for that same file are downgraded to INFO severity and
+    their duplicate_of is set to the highest-confidence flag-match finding.
     """
     if not findings:
         return findings
@@ -64,7 +72,40 @@ def deduplicate(findings: List[Finding]) -> List[Finding]:
                 other.duplicate_of = primary.id
                 result.append(other)
 
+    _suppress_xor_findings(result)
     return result
+
+
+def _suppress_xor_findings(findings: List[Finding]) -> None:
+    """
+    Suppression rule: for each file that already has a high-confidence flag
+    match, downgrade all XOR recovery findings for that file to INFO severity
+    and mark them as duplicates of the best flag-match finding.
+
+    Operates in-place on *findings*.
+    """
+    # Collect the highest-confidence flag-match finding per file.
+    best_flag_matches: Dict[str, Finding] = {}
+    for f in findings:
+        if f.flag_match and f.confidence >= _FLAG_MATCH_CONFIDENCE_THRESHOLD:
+            current = best_flag_matches.get(f.file)
+            if current is None or f.confidence > current.confidence:
+                best_flag_matches[f.file] = f
+
+    if not best_flag_matches:
+        return
+
+    for f in findings:
+        anchor = best_flag_matches.get(f.file)
+        if anchor is None:
+            continue
+        # Skip if this finding IS the anchor (don't suppress the flag match itself).
+        if f is anchor:
+            continue
+        if "XOR" in f.title:
+            f.severity = "INFO"
+            if f.duplicate_of is None:
+                f.duplicate_of = anchor.id
 
 
 def _within_proximity(a: int, b: int) -> bool:
