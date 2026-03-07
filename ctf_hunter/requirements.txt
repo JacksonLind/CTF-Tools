@@ -11,3 +11,4 @@ pyzipper>=0.3.6
 olefile>=0.47
 PyMuPDF>=1.23.0
 pyinstaller>=6.0.0
+bcrypt>=4.0.0
