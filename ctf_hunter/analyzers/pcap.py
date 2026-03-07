@@ -1,12 +1,15 @@
 """
 PCAP analyzer: protocol summary, TCP stream reassembly, HTTP bodies,
-credential sniffing, file carving, flag pattern search.
+credential sniffing, file carving, flag pattern search, and DNS covert
+channel detection.
 Uses scapy with tshark fallback.
 """
 from __future__ import annotations
 
 import re
 import base64
+import binascii
+import string
 from collections import defaultdict, Counter
 from pathlib import Path
 from typing import List, Optional
@@ -71,6 +74,9 @@ class PcapAnalyzer(Analyzer):
         if depth == "deep":
             # File carving
             findings.extend(self._carve_files(path, streams, flag_pattern))
+
+        # DNS covert channel detection (always run)
+        findings.extend(self._detect_dns_covert_channel(path, packets, flag_pattern))
 
         return findings
 
@@ -243,3 +249,216 @@ class PcapAnalyzer(Analyzer):
                         confidence=0.80,
                     ))
         return findings
+
+    # ------------------------------------------------------------------
+    # DNS covert channel detection
+    # ------------------------------------------------------------------
+
+    def _detect_dns_covert_channel(
+        self, path: str, packets, flag_pattern: re.Pattern
+    ) -> List[Finding]:
+        """Detect DNS covert channels by analysing DNS query subdomain labels.
+
+        For every UDP/53 packet the queried domain name is extracted from the
+        DNS wire format.  Queries are grouped by *base domain* (everything
+        after the first subdomain label).  For each base domain the leftmost
+        subdomain label from each query is collected in packet-arrival order,
+        concatenated, and decoded as Base64 / Base32 / hex / raw ASCII.
+
+        * HIGH   – when any decode produces printable ASCII or matches the
+                   configured flag pattern.
+        * MEDIUM – for any base domain that received ≥ 3 queries, even if
+                   decoding fails (suspected covert channel).
+        """
+        findings: List[Finding] = []
+        try:
+            from scapy.all import UDP, IP  # noqa: F401 – availability check
+        except Exception:
+            return []
+
+        # base_domain -> [(packet_index, leftmost_subdomain_label), ...]
+        queries: dict[str, list[tuple[int, str]]] = defaultdict(list)
+
+        for i, pkt in enumerate(packets):
+            if not pkt.haslayer("UDP"):
+                continue
+            try:
+                from scapy.all import UDP as _UDP
+                if pkt[_UDP].dport != 53 and pkt[_UDP].sport != 53:
+                    continue
+            except Exception:
+                continue
+
+            domain = self._extract_dns_qname(pkt)
+            if not domain:
+                continue
+
+            labels = domain.rstrip(".").split(".")
+            if len(labels) < 2:
+                continue
+
+            # The leftmost label is the potential encoded chunk; the rest is
+            # the base domain used as the covert channel carrier.
+            leftmost = labels[0]
+            base_domain = ".".join(labels[1:])
+            queries[base_domain].append((i, leftmost))
+
+        for base_domain, query_list in queries.items():
+            subdomains = [s for _, s in query_list]
+            concatenated = "".join(subdomains)
+
+            # Try decodes in priority order
+            decoded: Optional[str] = None
+            decode_method: str = ""
+
+            for method, fn in (
+                ("Base64", self._try_b64decode),
+                ("Base32", self._try_b32decode),
+                ("Hex",    self._try_hexdecode),
+            ):
+                result = fn(concatenated)
+                if result is not None and self._is_printable_ascii(result):
+                    decoded = result
+                    decode_method = method
+                    break
+
+            # Fallback: raw concatenation as ASCII
+            if decoded is None and self._is_printable_ascii(concatenated):
+                decoded = concatenated
+                decode_method = "Raw ASCII"
+
+            # HIGH finding when we successfully decoded something meaningful
+            if decoded is not None and (
+                self._is_printable_ascii(decoded)
+                or self._check_flag(decoded, flag_pattern)
+            ):
+                flag_found = self._check_flag(decoded, flag_pattern)
+                detail = (
+                    f"Base domain: {base_domain}\n"
+                    f"Subdomains ({len(subdomains)}): "
+                    f"{', '.join(subdomains[:30])}\n"
+                    f"Decode method: {decode_method}\n"
+                    f"Reconstructed: {decoded[:500]}"
+                )
+                findings.append(self._finding(
+                    path,
+                    f"DNS covert channel decoded ({decode_method}): "
+                    f"{decoded[:80]}",
+                    detail,
+                    severity="HIGH",
+                    flag_match=flag_found,
+                    confidence=0.90,
+                ))
+
+            # MEDIUM finding for ≥ 3 queries only when decoding failed
+            # (the problem spec says "even if decoding fails", implying MEDIUM
+            # is the fallback for undecodable but suspicious traffic)
+            if len(query_list) >= 3 and decoded is None:
+                detail = (
+                    f"Base domain: {base_domain}\n"
+                    f"Query count: {len(query_list)}\n"
+                    f"Subdomains: {', '.join(subdomains[:30])}\n"
+                    f"Concatenated labels: {concatenated[:200]}"
+                )
+                findings.append(self._finding(
+                    path,
+                    f"Suspected DNS covert channel on {base_domain} "
+                    f"({len(query_list)} queries)",
+                    detail,
+                    severity="MEDIUM",
+                    confidence=0.70,
+                ))
+
+        return findings
+
+    # ------------------------------------------------------------------
+    # DNS wire-format helpers
+    # ------------------------------------------------------------------
+
+    def _extract_dns_qname(self, pkt) -> Optional[str]:
+        """Extract the first QNAME from a DNS packet using scapy or raw parsing."""
+        # Prefer scapy's DNS layer
+        try:
+            from scapy.all import DNSQR
+            if pkt.haslayer(DNSQR):
+                qname = pkt[DNSQR].qname
+                if isinstance(qname, bytes):
+                    return qname.decode("latin-1", errors="replace")
+                return str(qname)
+        except Exception:
+            pass
+
+        # Fallback: manual DNS wire-format parse
+        try:
+            from scapy.all import UDP, Raw
+            if pkt.haslayer(Raw):
+                raw = bytes(pkt[Raw].load)
+            else:
+                raw = bytes(pkt[UDP].payload)
+            return self._parse_dns_qname_raw(raw)
+        except Exception:
+            return None
+
+    def _parse_dns_qname_raw(self, data: bytes) -> Optional[str]:
+        """Parse the QNAME from raw DNS payload (after 12-byte header)."""
+        if len(data) < 13:
+            return None
+        offset = 12  # skip DNS fixed header
+        labels: list[str] = []
+        while offset < len(data):
+            length = data[offset]
+            if length == 0:
+                break
+            # Compression pointer — not expected in queries, but stop gracefully
+            if (length & 0xC0) == 0xC0:
+                break
+            offset += 1
+            end = offset + length
+            if end > len(data):
+                break
+            labels.append(data[offset:end].decode("latin-1", errors="replace"))
+            offset = end
+        return ".".join(labels) if labels else None
+
+    # ------------------------------------------------------------------
+    # Decode helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _try_b64decode(s: str) -> Optional[str]:
+        """Return the Base64-decoded string, or None on failure."""
+        try:
+            # Add padding if needed
+            padded = s + "=" * (-len(s) % 4)
+            raw = base64.b64decode(padded, validate=False)
+            return raw.decode("utf-8", errors="strict")
+        except Exception:
+            return None
+
+    @staticmethod
+    def _try_b32decode(s: str) -> Optional[str]:
+        """Return the Base32-decoded string, or None on failure."""
+        try:
+            padded = s.upper() + "=" * (-len(s) % 8)
+            raw = base64.b32decode(padded)
+            return raw.decode("utf-8", errors="strict")
+        except Exception:
+            return None
+
+    @staticmethod
+    def _try_hexdecode(s: str) -> Optional[str]:
+        """Return the hex-decoded string, or None on failure."""
+        try:
+            raw = binascii.unhexlify(s)
+            return raw.decode("utf-8", errors="strict")
+        except Exception:
+            return None
+
+    @staticmethod
+    def _is_printable_ascii(s: str) -> bool:
+        """Return True when at least 80 % of characters are printable ASCII."""
+        if not s:
+            return False
+        printable = set(string.printable)
+        count = sum(1 for c in s if c in printable)
+        return count / len(s) >= 0.80

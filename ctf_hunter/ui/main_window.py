@@ -37,6 +37,7 @@ from ui.hex_viewer import HexViewer
 from ui.diff_view import DiffViewWindow
 from ui.flag_summary import FlagSummaryTab
 from ui.steg_viewer import StegViewerTab
+from ui.file_intel import FileIntelTab
 from ui.settings_dialog import SettingsDialog, load_config
 from ui.session import save_session_dialog, load_session_dialog
 
@@ -286,6 +287,10 @@ class MainWindow(QMainWindow):
         self._steg_viewer = StegViewerTab()
         tabs.addTab(self._steg_viewer, "🔬 Steg Viewer")
 
+        # --- Tab 4: File Intel ---
+        self._file_intel = FileIntelTab()
+        tabs.addTab(self._file_intel, "🔑 File Intel")
+
         self.setCentralWidget(tabs)
         self._tabs = tabs
 
@@ -419,6 +424,7 @@ class MainWindow(QMainWindow):
         self._result_panel.show_findings(path, findings)
         self._hex_viewer.load_file(path)
         self._notes_edit.setPlainText(self._notes_by_file.get(path, ""))
+        self._file_intel.load_file(path)
 
     def _on_notes_changed(self) -> None:
         item = self._file_list.currentItem()
