@@ -2,9 +2,10 @@
 Disassembly analyzer: r2pipe (radare2) primary engine with Capstone linear fallback.
 
 Supports ELF, PE, and .so files.  Extracts imports, exports, relocations, GOT
-entries, a consolidated Symbol Map, per-function CFGs, and entry-point
-disassembly.  Falls back to the original Capstone linear disassembler when
-r2pipe / radare2 are not installed.
+entries, a consolidated Symbol Map, per-function CFGs, decompilation output,
+crypto-constant fingerprints, xref-mapped strings, and .so-specific constructor
+/ DWARF / LD_PRELOAD analysis.  Falls back to the original Capstone linear
+disassembler when r2pipe / radare2 are not installed.
 """
 from __future__ import annotations
 
@@ -26,6 +27,51 @@ _DANGEROUS_IMPORTS: set[str] = {
     "system", "execve", "gets", "strcpy", "printf",
     "read", "mmap", "mprotect",
 }
+
+# Exports that indicate an LD_PRELOAD hooking library (intercepts libc calls)
+_LD_PRELOAD_HOOKS: set[str] = {
+    "malloc", "free", "calloc", "realloc",
+    "open", "close", "read", "write",
+    "connect", "send", "recv",
+    "fopen", "fclose", "fread", "fwrite",
+}
+
+# Known crypto byte-pattern signatures searched in binary data.
+# Each entry: (display_name, byte_sequence, severity)
+_CRYPTO_SIGNATURES: list[tuple[str, bytes, str]] = [
+    # AES S-box first 16 bytes (little-endian row 0)
+    ("AES S-box", bytes([
+        0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5,
+        0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
+    ]), "HIGH"),
+    # AES inverse S-box first 8 bytes
+    ("AES inverse S-box", bytes([
+        0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38,
+    ]), "HIGH"),
+    # SHA-256 first round constant (0x428a2f98) little-endian
+    ("SHA-256 round constants", bytes([0x98, 0x2f, 0x8a, 0x42]), "MEDIUM"),
+    # SHA-512 first round constant (0x428a2f98d728ae22) little-endian
+    ("SHA-512 round constants", bytes([
+        0x22, 0xae, 0x28, 0xd7, 0x98, 0x2f, 0x8a, 0x42,
+    ]), "MEDIUM"),
+    # SHA-1 initial hash value H0 (0x67452301) little-endian
+    ("SHA-1/MD5 initial hash", bytes([0x01, 0x23, 0x45, 0x67]), "MEDIUM"),
+    # CRC32 table first two entries (little-endian)
+    ("CRC32 lookup table", bytes([
+        0x00, 0x00, 0x00, 0x00, 0x96, 0x30, 0x07, 0x77,
+    ]), "MEDIUM"),
+    # DES initial permutation table (first 8 bytes)
+    ("DES permutation table", bytes([
+        0x3a, 0x32, 0x2a, 0x22, 0x1a, 0x12, 0x0a, 0x02,
+    ]), "MEDIUM"),
+    # RC4 identity permutation seed — the sequential 0x00…0x13 byte sequence
+    # in .rodata indicates the S-box or identity table used to initialize RC4
+    ("RC4 identity table", bytes([
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        0x10, 0x11, 0x12, 0x13,
+    ]), "MEDIUM"),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +250,274 @@ def _capstone_fallback(
 
 
 # ---------------------------------------------------------------------------
+# r2pipe primary engine – helper steps 4-7
+# ---------------------------------------------------------------------------
+
+def _step4_decompile(
+    r2,
+    analyzer: "DisassemblyAnalyzer",
+    path: str,
+    funcs: list,
+    depth: str,
+    findings: List[Finding],
+) -> None:
+    """Step 4 – Decompile each function with r2ghidra (pdgj); fall back to pdf.
+
+    r2ghidra provides C-like pseudocode via the ``pdgj`` command.  If the
+    plugin is absent radare2 returns an error string, so we catch that and
+    fall back to the plain ``pdf`` (print disassembly of function) text
+    output instead.
+    """
+    func_limit = 5 if depth == "fast" else 20
+    for func in funcs[:func_limit]:
+        fname: str = func.get("name", "?")
+        faddr: int = func.get("offset", 0) or 0
+
+        # Try r2ghidra JSON decompilation first
+        try:
+            decomp_json = r2.cmdj(f"pdgj @ 0x{faddr:x}") or {}
+            code: str = decomp_json.get("code", "").strip()
+        except Exception:
+            decomp_json = {}
+            code = ""
+
+        engine = "r2ghidra"
+        if not code:
+            # Fallback: plain pdf text output
+            try:
+                code = (r2.cmd(f"pdf @ 0x{faddr:x}") or "").strip()
+                engine = "pdf"
+            except Exception:
+                code = ""
+
+        if code:
+            findings.append(analyzer._finding(
+                path,
+                f"Decompilation [{engine}]: {fname}",
+                code[:3000],
+                severity="INFO",
+                offset=faddr,
+                confidence=0.7,
+            ))
+
+
+def _step5_crypto_constants(
+    analyzer: "DisassemblyAnalyzer",
+    path: str,
+    data: bytes,
+    findings: List[Finding],
+) -> None:
+    """Step 5 – Detect known cryptographic constants via byte-pattern search.
+
+    Searches the raw binary for characteristic byte sequences from common
+    cryptographic primitives (AES, SHA-256/512, SHA-1/MD5, CRC32, DES, RC4).
+    Each hit is emitted as a finding so the analyst knows which ciphers are
+    likely in use.
+    """
+    for label, pattern, severity in _CRYPTO_SIGNATURES:
+        offset = data.find(pattern)
+        if offset != -1:
+            findings.append(analyzer._finding(
+                path,
+                f"Crypto constant detected: {label}",
+                f"Pattern found at file offset 0x{offset:08x} — "
+                f"binary likely implements or uses {label}",
+                severity=severity,
+                offset=offset,
+                confidence=0.8,
+            ))
+
+
+def _step6_xref_strings(
+    r2,
+    analyzer: "DisassemblyAnalyzer",
+    path: str,
+    depth: str,
+    findings: List[Finding],
+) -> None:
+    """Step 6 – Extract strings and map each to the functions that reference it.
+
+    Retrieves all binary strings via ``izj``, then for each string queries
+    ``axfj @ <vaddr>`` to find callers.  The result is a function→string
+    cross-reference map that highlights which routines deal with interesting
+    literals (passwords, URLs, error messages, flag fragments, etc.).
+    """
+    strings_raw: list = r2.cmdj("izj") or []
+    # Limit in fast mode to keep analysis snappy
+    str_limit = 30 if depth == "fast" else 150
+
+    xref_rows: list[str] = []
+    for sobj in strings_raw[:str_limit]:
+        vaddr: int = sobj.get("vaddr", 0) or 0
+        string_val: str = sobj.get("string", "")
+        if not string_val or not vaddr:
+            continue
+
+        try:
+            xrefs = r2.cmdj(f"axfj @ 0x{vaddr:x}") or []
+        except Exception:
+            xrefs = []
+
+        callers = [
+            f"0x{x.get('from', 0):08x}" for x in xrefs
+            if x.get("from")
+        ]
+        caller_str = ", ".join(callers[:5]) if callers else "(no xrefs)"
+        xref_rows.append(f"  {caller_str}  →  \"{string_val[:80]}\"")
+
+    if xref_rows:
+        findings.append(analyzer._finding(
+            path,
+            f"Xref-mapped strings ({len(xref_rows)} shown)",
+            "\n".join(xref_rows),
+            severity="INFO",
+            confidence=0.65,
+        ))
+
+
+def _step7_so_specifics(
+    r2,
+    analyzer: "DisassemblyAnalyzer",
+    path: str,
+    data: bytes,
+    findings: List[Finding],
+) -> None:
+    """Step 7 – .so-specific analysis: constructors, DWARF, LD_PRELOAD detection.
+
+    Constructor functions (.init_array / .ctors):
+        Functions registered in ``.init_array`` or ``.ctors`` ELF sections run
+        *before* ``main`` and are a favourite CTF hiding place.  We locate
+        these sections via ``iSj``, read the function-pointer array from the
+        binary, resolve each pointer to a symbol name via ``fd @ <addr>``, and
+        emit HIGH-severity findings for each constructor.
+
+    DWARF debug information:
+        If the .so retains DWARF sections (``.debug_*``) the binary was built
+        without stripping.  We surface source file names extracted via
+        ``idpj`` (r2 DWARF parser) as INFO findings.
+
+    LD_PRELOAD indicator:
+        A shared library that exports the same symbol names as libc (``open``,
+        ``read``, ``write``, ``malloc``, …) is almost certainly designed to be
+        injected via ``LD_PRELOAD`` to intercept calls.  We flag any overlap
+        with the well-known hook set.
+    """
+    # ------------------------------------------------------------------ #
+    # 7a – Constructor detection (.init_array / .ctors)                    #
+    # ------------------------------------------------------------------ #
+    sections_raw: list = r2.cmdj("iSj") or []
+
+    # Section types that hold constructor function pointers
+    ctor_section_names = {".init_array", ".ctors", "__mod_init_func"}
+    ctor_sections = [
+        s for s in sections_raw
+        if s.get("name", "") in ctor_section_names
+    ]
+
+    for sec in ctor_sections:
+        sec_name: str = sec.get("name", "")
+        sec_vaddr: int = sec.get("vaddr", 0) or 0
+        sec_paddr: int = sec.get("paddr", 0) or 0
+        sec_size: int = sec.get("size", 0) or 0
+
+        # Read pointer-sized entries from the raw binary
+        ptr_size = 8 if len(data) > 4 and data[4] == 2 else 4  # ELF class: 2=64-bit
+        fmt = "<Q" if ptr_size == 8 else "<I"
+        n_ptrs = sec_size // ptr_size
+
+        ctor_details: list[str] = []
+        for i in range(min(n_ptrs, 32)):
+            offset = sec_paddr + i * ptr_size
+            if offset + ptr_size > len(data):
+                break
+            try:
+                fn_ptr = struct.unpack_from(fmt, data, offset)[0]
+            except struct.error:
+                break
+            if fn_ptr == 0:
+                continue
+            # Resolve symbol name from r2
+            try:
+                sym_name = (r2.cmd(f"fd @ 0x{fn_ptr:x}") or "").strip()
+            except Exception:
+                sym_name = ""
+            sym_name = sym_name or f"sub_0x{fn_ptr:x}"
+            ctor_details.append(f"  0x{fn_ptr:08x}  {sym_name}")
+
+        if ctor_details:
+            findings.append(analyzer._finding(
+                path,
+                f"Constructor functions in {sec_name} "
+                f"({len(ctor_details)} entries)",
+                "\n".join(ctor_details),
+                severity="HIGH",
+                offset=sec_vaddr,
+                confidence=0.85,
+            ))
+
+    # ------------------------------------------------------------------ #
+    # 7b – DWARF debug information                                         #
+    # ------------------------------------------------------------------ #
+    debug_sections = [
+        s.get("name", "") for s in sections_raw
+        if s.get("name", "").startswith(".debug_")
+    ]
+
+    if debug_sections:
+        # Try to extract DWARF compilation-unit info via r2's idpj
+        dwarf_detail_lines: list[str] = [
+            f"Debug sections present: {', '.join(debug_sections[:10])}"
+        ]
+        try:
+            dwarf_raw = r2.cmdj("idpj") or []
+            for cu in dwarf_raw[:20]:
+                comp_dir = cu.get("comp_dir", "")
+                producer = cu.get("producer", "")
+                lang = cu.get("language", "")
+                src = cu.get("name", "")
+                if src or comp_dir:
+                    dwarf_detail_lines.append(
+                        f"  CU: {src}  dir={comp_dir}  lang={lang}  "
+                        f"compiler={producer}"
+                    )
+        except Exception:
+            pass
+
+        findings.append(analyzer._finding(
+            path,
+            "DWARF debug info present (binary not stripped)",
+            "\n".join(dwarf_detail_lines),
+            severity="INFO",
+            confidence=0.75,
+        ))
+
+    # ------------------------------------------------------------------ #
+    # 7c – LD_PRELOAD hook indicator                                       #
+    # ------------------------------------------------------------------ #
+    try:
+        exports_raw: list = r2.cmdj("iEj") or []
+    except Exception:
+        exports_raw = []
+
+    export_names: set[str] = set()
+    for exp in exports_raw:
+        raw_name: str = exp.get("name", "")
+        # Strip leading underscores to normalize (e.g. _open -> open)
+        export_names.add(raw_name.lstrip("_"))
+
+    hooked = sorted(export_names & _LD_PRELOAD_HOOKS)
+    if hooked:
+        findings.append(analyzer._finding(
+            path,
+            f"LD_PRELOAD hook library detected ({len(hooked)} libc symbol(s) overridden)",
+            "Exported symbols that shadow libc: " + ", ".join(hooked) + "\n"
+            "This .so is likely injected via LD_PRELOAD to intercept system calls.",
+            severity="HIGH",
+            confidence=0.9,
+        ))
+
+
+# ---------------------------------------------------------------------------
 # r2pipe primary engine
 # ---------------------------------------------------------------------------
 
@@ -221,7 +535,7 @@ def _r2_analyze(
     equivalent to ``aaa``).  The session is always closed in a ``finally``
     block to prevent zombie r2 processes.
     """
-    import r2pipe  # noqa: F401 – ImportError propagates to caller for fallback
+    import r2pipe  # noqa: F401 - ImportError propagates to caller for fallback
 
     findings: List[Finding] = []
     r2 = None
@@ -383,6 +697,28 @@ def _r2_analyze(
                 severity="INFO",
                 confidence=0.7,
             ))
+
+        # ------------------------------------------------------------------ #
+        # Step 4 – Decompilation (r2ghidra / pdf fallback)                  #
+        # ------------------------------------------------------------------ #
+        if funcs:
+            _step4_decompile(r2, analyzer, path, funcs, depth, findings)
+
+        # ------------------------------------------------------------------ #
+        # Step 5 – Crypto constant detection                                   #
+        # ------------------------------------------------------------------ #
+        _step5_crypto_constants(analyzer, path, data, findings)
+
+        # ------------------------------------------------------------------ #
+        # Step 6 – Xref-mapped strings                                         #
+        # ------------------------------------------------------------------ #
+        _step6_xref_strings(r2, analyzer, path, depth, findings)
+
+        # ------------------------------------------------------------------ #
+        # Step 7 – .so-specific: constructor / DWARF / LD_PRELOAD             #
+        # ------------------------------------------------------------------ #
+        if is_so:
+            _step7_so_specifics(r2, analyzer, path, data, findings)
 
         # ------------------------------------------------------------------ #
         # Entry-point disassembly for AI context                               #
