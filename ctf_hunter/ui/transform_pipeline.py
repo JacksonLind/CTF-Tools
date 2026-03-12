@@ -114,10 +114,12 @@ def _zlib_decompress(data: bytes, _param: str) -> bytes:
 
 
 def _aes_ecb_decrypt(data: bytes, param: str) -> bytes:
+    # NOTE: AES-ECB is intentionally included as a CTF analysis/decryption transform
+    # for challenge data. It is *not* intended for production cryptographic use.
     if not _AES_AVAILABLE:
         raise RuntimeError("pycryptodome not installed — AES unavailable")
     key = bytes.fromhex(param) if re.fullmatch(r"[0-9a-fA-F]+", param) else param.encode("utf-8")
-    cipher = _AES.new(key, _AES.MODE_ECB)
+    cipher = _AES.new(key, _AES.MODE_ECB)  # nosec B501 — CTF analysis tool
     return cipher.decrypt(data)
 
 
