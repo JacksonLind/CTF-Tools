@@ -36,6 +36,13 @@ _LD_PRELOAD_HOOKS: set[str] = {
     "fopen", "fclose", "fread", "fwrite",
 }
 
+# Minimum separation (bytes) between two hits of the same crypto pattern before
+# a second finding is emitted.  256 bytes is chosen because a crypto table
+# (e.g. AES S-box = 256 bytes) repeated back-to-back or padded to an
+# alignment boundary will appear within this window and should be counted as a
+# single instance rather than generating two separate findings.
+_CRYPTO_DEDUP_WINDOW = 256
+
 # Known crypto byte-pattern signatures searched in binary data.
 # Each entry: (display_name, byte_sequence, severity)
 _CRYPTO_SIGNATURES: list[tuple[str, bytes, str]] = [
@@ -260,28 +267,46 @@ def _step4_decompile(
     funcs: list,
     depth: str,
     findings: List[Finding],
-) -> None:
+) -> list[dict]:
     """Step 4 – Decompile each function with r2ghidra (pdgj); fall back to pdf.
 
-    r2ghidra provides C-like pseudocode via the ``pdgj`` command.  If the
-    plugin is absent radare2 returns an error string, so we catch that and
-    fall back to the plain ``pdf`` (print disassembly of function) text
-    output instead.
+    r2ghidra provides C-like pseudocode via the ``pdgj`` command.  Two
+    distinct failure modes are handled before falling back to ``pdf``:
+
+    * **Missing ``code`` key** – r2ghidra returned an error object such as
+      ``{"error": "cannot decompile indirect jump"}`` with no ``code`` field.
+    * **Empty ``code`` value** – r2ghidra returned ``{"code": ""}`` or
+      ``{"code": null}`` for functions it cannot represent (e.g. hand-written
+      asm, heavily obfuscated code).
+
+    Both cases are caught by normalising the ``cmdj`` result to a dict and
+    using ``decomp_dict.get("code") or ""`` so that ``None``, a missing key,
+    and an empty string all produce the same falsy value.
+
+    Returns a list of ``{"name", "address", "pseudocode"}`` dicts suitable
+    for the Step 8 structured AI payload.
     """
     func_limit = 5 if depth == "fast" else 20
+    decompiled: list[dict] = []
+
     for func in funcs[:func_limit]:
         fname: str = func.get("name", "?")
         faddr: int = func.get("offset", 0) or 0
 
-        # Try r2ghidra JSON decompilation first
+        # Try r2ghidra JSON decompilation first.  cmdj may return None, a
+        # list, or a dict whose "error" key indicates failure — all must
+        # fall through to the pdf fallback.
+        code = ""
+        engine = "r2ghidra"
         try:
-            decomp_json = r2.cmdj(f"pdgj @ 0x{faddr:x}") or {}
-            code: str = decomp_json.get("code", "").strip()
+            result = r2.cmdj(f"pdgj @ 0x{faddr:x}")
+            # Accept only dict results; a list or None means failure.
+            decomp_dict = result if isinstance(result, dict) else {}
+            # Missing "code" key AND empty/null "code" value both fall through.
+            code = (decomp_dict.get("code") or "").strip()
         except Exception:
-            decomp_json = {}
             code = ""
 
-        engine = "r2ghidra"
         if not code:
             # Fallback: plain pdf text output
             try:
@@ -299,6 +324,13 @@ def _step4_decompile(
                 offset=faddr,
                 confidence=0.7,
             ))
+            decompiled.append({
+                "name": fname,
+                "address": faddr,
+                "pseudocode": code[:1500],
+            })
+
+    return decompiled
 
 
 def _step5_crypto_constants(
@@ -306,26 +338,62 @@ def _step5_crypto_constants(
     path: str,
     data: bytes,
     findings: List[Finding],
-) -> None:
+) -> list[str]:
     """Step 5 – Detect known cryptographic constants via byte-pattern search.
 
     Searches the raw binary for characteristic byte sequences from common
     cryptographic primitives (AES, SHA-256/512, SHA-1/MD5, CRC32, DES, RC4).
-    Each hit is emitted as a finding so the analyst knows which ciphers are
-    likely in use.
+
+    All non-overlapping occurrences of each pattern are found.  Hits within
+    256 bytes of the previous accepted hit for the same pattern are suppressed
+    as near-duplicates — this prevents a single OpenSSL-linked binary from
+    generating dozens of AES findings that bury legitimate signal.  The
+    suppression count is noted in the finding detail.
+
+    Returns a list of detected crypto-primitive labels for the Step 8 AI
+    payload.
     """
+    detected_labels: list[str] = []
+
     for label, pattern, severity in _CRYPTO_SIGNATURES:
-        offset = data.find(pattern)
-        if offset != -1:
+        # Collect all non-overlapping occurrence offsets.
+        all_offsets: list[int] = []
+        start = 0
+        while True:
+            pos = data.find(pattern, start)
+            if pos == -1:
+                break
+            all_offsets.append(pos)
+            start = pos + len(pattern)
+
+        if not all_offsets:
+            continue
+
+        # Deduplicate: keep only hits that are more than 256 bytes apart from
+        # the last accepted hit (sliding window deduplication).
+        accepted: list[int] = [all_offsets[0]]
+        for off in all_offsets[1:]:
+            if off - accepted[-1] > _CRYPTO_DEDUP_WINDOW:
+                accepted.append(off)
+
+        suppressed = len(all_offsets) - len(accepted)
+        suffix = (
+            f" ({suppressed} near-duplicate occurrence(s) suppressed)"
+            if suppressed else ""
+        )
+        for offset in accepted:
             findings.append(analyzer._finding(
                 path,
                 f"Crypto constant detected: {label}",
                 f"Pattern found at file offset 0x{offset:08x} — "
-                f"binary likely implements or uses {label}",
+                f"binary likely implements or uses {label}{suffix}",
                 severity=severity,
                 offset=offset,
                 confidence=0.8,
             ))
+        detected_labels.append(label)
+
+    return detected_labels
 
 
 def _step6_xref_strings(
@@ -334,13 +402,19 @@ def _step6_xref_strings(
     path: str,
     depth: str,
     findings: List[Finding],
-) -> None:
+) -> list[str]:
     """Step 6 – Extract strings and map each to the functions that reference it.
 
     Retrieves all binary strings via ``izj``, then for each string queries
-    ``axfj @ <vaddr>`` to find callers.  The result is a function→string
-    cross-reference map that highlights which routines deal with interesting
-    literals (passwords, URLs, error messages, flag fragments, etc.).
+    ``axtj @ <vaddr>`` (analyze cross-references **to** the address) to find
+    which code locations reference the string.  ``axtj`` is the correct
+    command here — it returns callers of the address — whereas ``axfj``
+    (analyze cross-references **from** the address) would follow references
+    outward from the string itself, which is not useful for string-to-caller
+    mapping.
+
+    Returns the list of formatted cross-reference rows for the Step 8 AI
+    payload.
     """
     strings_raw: list = r2.cmdj("izj") or []
     # Limit in fast mode to keep analysis snappy
@@ -354,7 +428,8 @@ def _step6_xref_strings(
             continue
 
         try:
-            xrefs = r2.cmdj(f"axfj @ 0x{vaddr:x}") or []
+            # axtj: cross-references TO this address (i.e. code → string)
+            xrefs = r2.cmdj(f"axtj @ 0x{vaddr:x}") or []
         except Exception:
             xrefs = []
 
@@ -373,6 +448,8 @@ def _step6_xref_strings(
             severity="INFO",
             confidence=0.65,
         ))
+
+    return xref_rows
 
 
 def _step7_so_specifics(
@@ -420,8 +497,10 @@ def _step7_so_specifics(
         sec_paddr: int = sec.get("paddr", 0) or 0
         sec_size: int = sec.get("size", 0) or 0
 
-        # Read pointer-sized entries from the raw binary
-        ptr_size = 8 if len(data) > 4 and data[4] == 2 else 4  # ELF class: 2=64-bit
+        # Read pointer-sized entries from the raw binary.
+        # Guard against truncated / non-ELF data before accessing the ELF
+        # class byte at index 4 (1=32-bit, 2=64-bit).
+        ptr_size = 8 if (len(data) > 4 and data[:4] == b"\x7fELF" and data[4] == 2) else 4
         fmt = "<Q" if ptr_size == 8 else "<I"
         n_ptrs = sec_size // ptr_size
 
@@ -701,18 +780,19 @@ def _r2_analyze(
         # ------------------------------------------------------------------ #
         # Step 4 – Decompilation (r2ghidra / pdf fallback)                  #
         # ------------------------------------------------------------------ #
+        decompiled_funcs: list[dict] = []
         if funcs:
-            _step4_decompile(r2, analyzer, path, funcs, depth, findings)
+            decompiled_funcs = _step4_decompile(r2, analyzer, path, funcs, depth, findings)
 
         # ------------------------------------------------------------------ #
         # Step 5 – Crypto constant detection                                   #
         # ------------------------------------------------------------------ #
-        _step5_crypto_constants(analyzer, path, data, findings)
+        detected_crypto = _step5_crypto_constants(analyzer, path, data, findings)
 
         # ------------------------------------------------------------------ #
         # Step 6 – Xref-mapped strings                                         #
         # ------------------------------------------------------------------ #
-        _step6_xref_strings(r2, analyzer, path, depth, findings)
+        xref_rows = _step6_xref_strings(r2, analyzer, path, depth, findings)
 
         # ------------------------------------------------------------------ #
         # Step 7 – .so-specific: constructor / DWARF / LD_PRELOAD             #
@@ -758,6 +838,30 @@ def _r2_analyze(
                     severity="MEDIUM",
                     offset=entry_addr if entry_addr is not None else -1,
                     confidence=0.65,
+                ))
+
+        # ------------------------------------------------------------------ #
+        # Step 8 – Structured AI binary analysis payload                       #
+        # Sends a rich structured context to Claude — high-complexity          #
+        # function pseudocode, flagged imports, detected crypto primitives,    #
+        # and xref-mapped strings — to produce an actionable CTF attack plan.  #
+        # ------------------------------------------------------------------ #
+        if depth == "deep" and ai_client and ai_client.available:
+            analysis = ai_client.analyze_binary(
+                file_path=path,
+                high_complexity_functions=decompiled_funcs,
+                flagged_imports=[name for _, name in dangerous_found],
+                crypto_constants=detected_crypto,
+                xref_strings=xref_rows,
+            )
+            if analysis:
+                findings.append(analyzer._finding(
+                    path,
+                    "AI binary analysis (structured)",
+                    analysis,
+                    severity="HIGH",
+                    offset=entry_addr if entry_addr is not None else -1,
+                    confidence=0.75,
                 ))
 
     finally:

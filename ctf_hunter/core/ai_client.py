@@ -4,6 +4,7 @@ Uses the Anthropic Python SDK with claude-sonnet-4-20250514.
 """
 from __future__ import annotations
 
+import json
 import os
 from typing import List, Optional
 
@@ -96,6 +97,77 @@ class AIClient:
             f"All findings:\n{all_findings_summary[:6000]}"
         )
         return self._ask(prompt)
+
+    def analyze_binary(
+        self,
+        file_path: str,
+        high_complexity_functions: "list[dict]",
+        flagged_imports: "list[str]",
+        crypto_constants: "list[str]",
+        xref_strings: "list[str]",
+    ) -> str:
+        """Return a structured CTF attack plan from all binary-analysis data.
+
+        Sends a rich JSON context to Claude that ties together the outputs of
+        Steps 4–7 into a single prioritised attack plan.  The payload includes:
+
+        * ``high_complexity_functions`` – decompiled pseudocode (or pdf text)
+          for the most complex / interesting functions.
+        * ``flagged_imports``          – dangerous import names found in the binary.
+        * ``crypto_constants``         – cryptographic primitives detected by
+          byte-pattern search.
+        * ``xref_strings``             – strings with caller cross-references.
+
+        This is the highest-value AI output in the pipeline because it reasons
+        across all data simultaneously rather than commenting on each finding
+        in isolation.
+        """
+        payload = {
+            "file": file_path,
+            "high_complexity_functions": high_complexity_functions[:10],
+            "flagged_imports": flagged_imports,
+            "crypto_constants": crypto_constants,
+            "xref_strings": xref_strings[:30],
+        }
+        payload_json = json.dumps(payload, indent=2)[:5000]
+
+        system_prompt = (
+            "You are an expert reverse-engineer and CTF competition analyst. "
+            "You will be given structured analysis data extracted from a binary "
+            "using radare2. Your job is to synthesise all of the data into an "
+            "actionable, prioritised attack plan for capturing the flag.\n\n"
+            "Guidelines:\n"
+            "1. If decompiled pseudocode is present, identify the most suspicious "
+            "   functions (loops over XOR/shift operations, comparisons to static "
+            "   buffers, recursion, string decryption patterns).\n"
+            "2. Cross-reference flagged imports with crypto constants — e.g. "
+            "   'system' + AES S-box suggests a shell is spawned after decryption.\n"
+            "3. Map xref strings to their callers to pinpoint where the flag "
+            "   comparison or decryption routine lives.\n"
+            "4. Call out any LD_PRELOAD / constructor hooks as high-priority.\n"
+            "5. Produce a numbered, prioritised attack plan: what to patch / hook / "
+            "   trace first and why.\n"
+            "Be concise and actionable. Avoid restating the input data verbatim."
+        )
+
+        if not self.available:
+            return ""
+        try:
+            response = self._client.messages.create(
+                model=MODEL,
+                max_tokens=1500,
+                system=system_prompt,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"Analyse this binary and produce a CTF attack plan.\n\n"
+                        f"Analysis data (JSON):\n{payload_json}"
+                    ),
+                }],
+            )
+            return response.content[0].text if response.content else ""
+        except Exception as exc:
+            return f"[AI error: {exc}]"
 
     def parse_challenge_description(
         self,
