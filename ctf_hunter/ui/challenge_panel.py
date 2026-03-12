@@ -240,6 +240,15 @@ class ChallengePanelTab(QWidget):
         """Receive the latest file findings from MainWindow."""
         self._all_findings = all_findings
 
+    def set_additional_context(self, context: str) -> None:
+        """Append additional context (e.g., from Transform Pipeline) to the description input."""
+        existing = self._desc_input.toPlainText()
+        separator = "\n\n--- Transform Pipeline Output ---\n"
+        if separator in existing:
+            # Replace existing pipeline context
+            existing = existing[:existing.index(separator)]
+        self._desc_input.setPlainText(existing + separator + context)
+
     # ------------------------------------------------------------------
     # Parse logic
     # ------------------------------------------------------------------

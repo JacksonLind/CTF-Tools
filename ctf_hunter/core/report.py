@@ -7,7 +7,7 @@ import json
 import uuid
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 
 @dataclass
@@ -25,6 +25,7 @@ class Finding:
     confidence: float = 0.5
     duplicate_of: Optional[str] = None
     corroboration_count: int = 1
+    corroboration: List[str] = field(default_factory=list)  # IDs of supporting findings
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -42,8 +43,9 @@ class Session:
     findings: list[Finding] = field(default_factory=list)
     notes: dict[str, str] = field(default_factory=dict)   # path -> note text
     flag_pattern: str = r"CTF\{[^}]+\}"
-    depth: str = "fast"    # fast | deep
+    depth: str = "fast"    # fast | deep | auto
     watchfolder_path: str = ""
+    pipeline_configs: list[dict] = field(default_factory=list)  # saved transform pipelines
 
     def to_dict(self) -> dict:
         return {
@@ -53,6 +55,7 @@ class Session:
             "flag_pattern": self.flag_pattern,
             "depth": self.depth,
             "watchfolder_path": self.watchfolder_path,
+            "pipeline_configs": self.pipeline_configs,
         }
 
     @classmethod
@@ -65,6 +68,7 @@ class Session:
             flag_pattern=data.get("flag_pattern", r"CTF\{[^}]+\}"),
             depth=data.get("depth", "fast"),
             watchfolder_path=data.get("watchfolder_path", ""),
+            pipeline_configs=data.get("pipeline_configs", []),
         )
 
     def save(self, path: str) -> None:

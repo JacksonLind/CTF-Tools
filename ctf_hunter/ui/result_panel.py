@@ -4,14 +4,14 @@ flag-match highlighting, and per-file "Analyze with AI" button.
 """
 from __future__ import annotations
 
-from typing import List, Callable
+from typing import List, Callable, Optional
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
-    QPushButton, QLabel, QTextEdit,
+    QPushButton, QLabel, QTextEdit, QMenu, QApplication,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtGui import QFont, QColor, QAction
 
 from core.report import Finding
 from ui.tool_suggester_panel import SuggestedToolsPanel
@@ -28,6 +28,7 @@ class ResultPanel(QWidget):
     """Shows the findings tree and triggers hex viewer jumps."""
 
     finding_selected = pyqtSignal(object)   # emits Finding
+    pin_finding_requested = pyqtSignal(object)  # emits Finding for Transform Pipeline
 
     def __init__(self, ai_client=None, parent=None):
         super().__init__(parent)
@@ -52,7 +53,7 @@ class ResultPanel(QWidget):
         hdr.addWidget(self._ai_btn)
         layout.addLayout(hdr)
 
-        # Findings tree
+        # Findings tree with context menu
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["Severity", "Analyzer", "Title", "Confidence", "Offset"])
         self._tree.setColumnWidth(0, 80)
@@ -61,6 +62,8 @@ class ResultPanel(QWidget):
         self._tree.setColumnWidth(3, 70)
         self._tree.setColumnWidth(4, 80)
         self._tree.itemSelectionChanged.connect(self._on_selection)
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._finding_context_menu)
         layout.addWidget(self._tree)
 
         # Detail box
@@ -127,6 +130,22 @@ class ResultPanel(QWidget):
         if f:
             self._detail.setPlainText(f.detail)
             self.finding_selected.emit(f)
+
+    def _finding_context_menu(self, pos) -> None:
+        item = self._tree.itemAt(pos)
+        if not item:
+            return
+        f: Optional[Finding] = item.data(0, Qt.ItemDataRole.UserRole)
+        if not f:
+            return
+        menu = QMenu(self)
+        copy_act = menu.addAction("📋 Copy detail")
+        pin_act = menu.addAction("📌 Pin to Transform Pipeline")
+        action = menu.exec(self._tree.mapToGlobal(pos))
+        if action == copy_act:
+            QApplication.clipboard().setText(f.detail)
+        elif action == pin_act:
+            self.pin_finding_requested.emit(f)
 
     def _analyze_with_ai(self) -> None:
         if not self._ai_client or not self._ai_client.available:
