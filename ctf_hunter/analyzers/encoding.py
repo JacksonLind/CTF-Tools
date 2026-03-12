@@ -362,10 +362,8 @@ def _char_freq_vector(s: str) -> Dict[str, float]:
     if not s:
         return {}
     total = len(s)
-    freq: Dict[str, float] = {}
-    for ch in s:
-        freq[ch] = freq.get(ch, 0) + 1.0 / total
-    return freq
+    freq_counts = Counter(s)
+    return {ch: count / total for ch, count in freq_counts.items()}
 
 
 def _cosine_similarity(v1: Dict[str, float], v2: Dict[str, float]) -> float:

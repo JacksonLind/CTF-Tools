@@ -412,7 +412,7 @@ class HypothesisEngine:
         hypotheses.extend(self._rule_based(findings))
 
         # AI-augmented path
-        if self._ai_client and getattr(self._ai_client, "_api_key", None):
+        if self._ai_client and self._ai_client.available:
             ai_hyps = self._ai_augmented(findings, session)
             hypotheses.extend(ai_hyps)
 

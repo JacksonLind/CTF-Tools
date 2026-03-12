@@ -222,12 +222,19 @@ def _wiener_attack(n: int, e: int) -> Optional[int]:
 # ---------------------------------------------------------------------------
 
 def _integer_cube_root(n: int) -> Optional[int]:
-    """Return integer cube root of n if it's a perfect cube, else None."""
+    """
+    Return integer cube root of n if it's a perfect cube, else None.
+    Uses Newton's method for exact integer arithmetic (handles large integers).
+    """
     if n <= 0:
         return None
-    r = _isqrt(n)  # approximate
-    # Better: use Newton's method for cube root
-    x = int(round(n ** (1 / 3)))
+    # Newton's method for integer cube root
+    x = n
+    y = (2 * x + n // (x * x)) // 3
+    while y < x:
+        x = y
+        y = (2 * x + n // (x * x)) // 3
+    # Check neighbours due to rounding
     for candidate in [x - 1, x, x + 1]:
         if candidate > 0 and candidate ** 3 == n:
             return candidate
@@ -570,6 +577,11 @@ class CryptoRSAAnalyzer(Analyzer):
         findings: List[Finding] = []
 
         # Common modulus attack (same N, different e, different ciphertext)
+        # NOTE: This attack requires two *distinct* ciphertexts of the same
+        # plaintext encrypted under different exponents with the same modulus.
+        # When only one ciphertext is available in the file we report the
+        # vulnerability as an INFO/MEDIUM diagnostic instead of attempting
+        # the attack (which would be ineffective with c1 == c2).
         seen_n: dict[int, List[dict]] = {}
         for k in keys:
             n = k.get("n", 0)
@@ -581,9 +593,10 @@ class CryptoRSAAnalyzer(Analyzer):
                 k1, k2 = key_group[0], key_group[1]
                 e1, e2 = k1.get("e", 0), k2.get("e", 0)
                 if e1 and e2 and e1 != e2:
-                    c1 = self._extract_ciphertext(raw, n)
-                    c2 = c1  # same file, same ciphertext; demonstration only
-                    if c1 and c2:
+                    c1 = k1.get("ciphertext") or self._extract_ciphertext(raw, n)
+                    c2 = k2.get("ciphertext")
+                    if c1 and c2 and c1 != c2:
+                        # Distinct ciphertexts available — attempt the attack
                         m = _common_modulus_attack(n, e1, e2, c1, c2)
                         if m is not None:
                             plaintext = _try_decode_plaintext(m)
@@ -597,10 +610,15 @@ class CryptoRSAAnalyzer(Analyzer):
                                 confidence=0.85 if fm else 0.65,
                             ))
                     else:
+                        # Only one ciphertext — report as vulnerability finding
                         findings.append(self._finding(
                             path,
                             "Common modulus vulnerability detected",
-                            f"Multiple keys share N ({n.bit_length()}-bit) with e1={e1}, e2={e2}",
+                            (
+                                f"Multiple keys share N ({n.bit_length()}-bit) "
+                                f"with e1={e1}, e2={e2}. "
+                                "Provide two distinct ciphertexts to attempt decryption."
+                            ),
                             severity="MEDIUM",
                             confidence=0.70,
                         ))

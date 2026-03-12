@@ -32,6 +32,10 @@ _LOW_ENTROPY_RESULT_BOOST = 0.10
 # Maximum confidence cap
 _MAX_CONFIDENCE = 0.99
 
+# Entropy thresholds for garbage/suspicious detection
+_HIGH_ENTROPY_THRESHOLD = 7.0    # > this → likely encrypted/compressed garbage
+_MEDIUM_ENTROPY_THRESHOLD = 6.5  # > this → suspicious if mostly non-printable
+
 
 def _shannon_entropy(data: bytes) -> float:
     if not data:
@@ -171,9 +175,9 @@ class ConfidenceScorer:
                 encoded_ent = decoded_ent
 
             # Garbage penalty: high entropy decoded result that isn't printable
-            if decoded_ent > 7.0 and not _is_mostly_printable(decoded):
+            if decoded_ent > _HIGH_ENTROPY_THRESHOLD and not _is_mostly_printable(decoded):
                 f.confidence = max(0.0, f.confidence - _GARBAGE_PENALTY)
-            elif decoded_ent > 6.5 and not _is_mostly_printable(decoded, 0.70):
+            elif decoded_ent > _MEDIUM_ENTROPY_THRESHOLD and not _is_mostly_printable(decoded, 0.70):
                 f.confidence = max(0.0, f.confidence - _GARBAGE_PENALTY * 0.5)
             # Low-entropy result boost: entropy dropped significantly (good decoding)
             elif encoded_ent > 5.0 and decoded_ent < 4.0 and _is_mostly_printable(decoded):

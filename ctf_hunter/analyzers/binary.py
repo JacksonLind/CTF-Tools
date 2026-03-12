@@ -42,8 +42,7 @@ except ImportError:
     _ANGR_AVAILABLE = False
     logger.info("angr not installed; symbolic execution disabled.")
 
-_SUSPICIOUS_IMPORTS = {
-    "VirtualAlloc", "VirtualAllocEx", "WriteProcessMemory", "CreateRemoteThread",
+_SUSPICIOUS_IMPORTS = {    "VirtualAlloc", "VirtualAllocEx", "WriteProcessMemory", "CreateRemoteThread",
     "WinExec", "ShellExecute", "ShellExecuteA", "ShellExecuteW",
     "system", "exec", "popen", "execve", "execl",
     "InternetOpenUrl", "URLDownloadToFile", "WinHttpOpen",
@@ -52,6 +51,9 @@ _SUSPICIOUS_IMPORTS = {
 
 # Sections scanned in Fast mode
 _FAST_MODE_SECTIONS: Set[str] = {".rodata", ".data"}
+
+# Maximum number of RET sites to scan for ROP gadgets (performance guard)
+_MAX_RET_SITES = 500
 
 # Named multi-byte XOR keys
 _NAMED_XOR_KEYS: List[bytes] = [
@@ -1020,7 +1022,7 @@ class BinaryAnalyzer(Analyzer):
 
             # Find all RET instructions and walk back up to 5 bytes for gadgets
             ret_offsets = [i for i, b in enumerate(data) if b == 0xC3]  # RET
-            for ret_off in ret_offsets[:500]:  # limit to 500 ret sites
+            for ret_off in ret_offsets[:_MAX_RET_SITES]:
                 for look_back in range(1, 6):
                     start = ret_off - look_back
                     if start < 0:

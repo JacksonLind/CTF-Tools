@@ -33,6 +33,9 @@ _PASSWORD_HINT_RE = re.compile(
 )
 _ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz"}
 
+# Hash hex-string lengths by algorithm
+_HASH_LENGTHS: dict[int, str] = {32: "MD5", 40: "SHA1", 64: "SHA256", 128: "SHA512"}
+
 
 class WorkspaceCorrelator:
     """
@@ -197,7 +200,7 @@ class _FileFeatures:
 
             # Extract hashes
             for h in _HASH_RE.findall(text):
-                if len(h) in (32, 40, 64, 128):  # MD5/SHA1/SHA256/SHA512 lengths
+                if len(h) in _HASH_LENGTHS:
                     obj.hashes.add(h.lower())
 
             # Extract password hints

@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDockWidget,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -213,7 +214,7 @@ def _to_hex_ascii(data: bytes, max_bytes: int = 256) -> str:
     return f"HEX:   {hex_part}\nASCII: {ascii_part}{suffix}"
 
 
-class TransformNode(QWidget):
+class TransformNode(QFrame):
     """A single node in the transform chain."""
 
     output_changed = pyqtSignal()  # emitted when output data changes
@@ -275,7 +276,7 @@ class TransformNode(QWidget):
         self._error_label.setStyleSheet("color: red;")
         layout.addWidget(self._error_label)
 
-        self.setFrameShape(self.Shape.Box if hasattr(self, 'Shape') else 1)
+        self.setFrameShape(QFrame.Shape.Box)
         self._on_transform_changed(self._transform_combo.currentText())
 
     def set_input(self, data: bytes) -> None:

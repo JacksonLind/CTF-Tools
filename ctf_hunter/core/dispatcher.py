@@ -171,13 +171,14 @@ def _dispatch_auto(
 
     # Merge: start with fast findings, add deep findings not already covered
     fast_ids = {f.id for f in fast_findings}
+    # Build analyzer name set once to avoid O(n*m) check in loop
+    fast_analyzer_names: set[str] = {
+        ff.analyzer for ff in fast_findings if ff.duplicate_of is None
+    }
     merged = list(fast_findings)
     for f in deep_findings:
         # Skip analyzers that produced zero findings in fast and aren't corroborated
-        analyzer_had_fast = any(
-            ff.analyzer == f.analyzer for ff in fast_findings if ff.duplicate_of is None
-        )
-        if not analyzer_had_fast:
+        if f.analyzer not in fast_analyzer_names:
             # Only include if there's a corroborating analyzer at the same region
             if f.offset >= 0 and any(
                 abs(f.offset - off) <= 32 for off in high_conf_offsets
