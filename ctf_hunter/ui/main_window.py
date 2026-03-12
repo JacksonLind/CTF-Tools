@@ -43,6 +43,8 @@ from ui.settings_dialog import SettingsDialog, load_config
 from ui.session import save_session_dialog, load_session_dialog
 from ui.network_console import NetworkConsoleTab
 from ui.timeline_tab import TimelineTab
+from ui.transform_pipeline import make_transform_pipeline_dock, TransformPipelinePanel
+from ui.attack_plan_tab import AttackPlanTab
 
 # ---------------------------------------------------------------------------
 # Worker signals / runnable
@@ -125,6 +127,7 @@ class MainWindow(QMainWindow):
         # Build UI
         self._build_toolbar()
         self._build_central()
+        self._build_transform_pipeline_dock()
 
         # Update tool dots
         self._update_tool_status()
@@ -146,11 +149,15 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        # Fast / Deep toggle
+        # Fast / Deep / Auto toggle
         tb.addWidget(QLabel("Mode: "))
         self._depth_combo = QComboBox()
-        self._depth_combo.addItems(["Fast", "Deep"])
-        self._depth_combo.setToolTip("Fast: quick analysis\nDeep: full LSB, disasm, XOR, PCAP streams")
+        self._depth_combo.addItems(["Fast", "Deep", "Auto"])
+        self._depth_combo.setToolTip(
+            "Fast: quick analysis\n"
+            "Deep: full LSB, disasm, XOR, PCAP streams\n"
+            "Auto: fast first, then deep for high-confidence regions"
+        )
         tb.addWidget(self._depth_combo)
 
         tb.addSeparator()
@@ -209,6 +216,15 @@ class MainWindow(QMainWindow):
         act_settings.triggered.connect(self._open_settings)
         tb.addAction(act_settings)
 
+        tb.addSeparator()
+
+        # Transform Pipeline toggle
+        self._pipeline_toggle_action = QAction("🔧 Transform Pipeline", self)
+        self._pipeline_toggle_action.setCheckable(True)
+        self._pipeline_toggle_action.setChecked(True)
+        self._pipeline_toggle_action.triggered.connect(self._toggle_transform_pipeline)
+        tb.addAction(self._pipeline_toggle_action)
+
     # ------------------------------------------------------------------
     # Central widget
     # ------------------------------------------------------------------
@@ -253,6 +269,12 @@ class MainWindow(QMainWindow):
         self._file_list.currentItemChanged.connect(self._on_file_selected)
         left_layout.addWidget(self._file_list)
 
+        # Correlate All button
+        correlate_btn = QPushButton("🔗 Correlate All Files")
+        correlate_btn.setToolTip("Cross-correlate findings across all loaded files")
+        correlate_btn.clicked.connect(self._correlate_all_files)
+        left_layout.addWidget(correlate_btn)
+
         # Notes field
         left_layout.addWidget(QLabel("Notes (for selected file):"))
         self._notes_edit = QTextEdit()
@@ -270,6 +292,7 @@ class MainWindow(QMainWindow):
         self._result_panel = ResultPanel(ai_client=self._ai_client)
         self._result_panel.set_ai_client(self._ai_client)
         self._result_panel.finding_selected.connect(self._on_finding_selected)
+        self._result_panel.pin_finding_requested.connect(self._on_pin_finding)
         splitter_v.addWidget(self._result_panel)
 
         self._hex_viewer = HexViewer()
@@ -306,6 +329,10 @@ class MainWindow(QMainWindow):
         self._network_console = NetworkConsoleTab(session=self._session)
         self._network_console.flag_detected.connect(self._on_network_flag_detected)
         tabs.addTab(self._network_console, "🌐 Network")
+
+        # --- Tab 8: Attack Plan ---
+        self._attack_plan = AttackPlanTab(ai_client=self._ai_client)
+        tabs.addTab(self._attack_plan, "⚔️ Attack Plan")
 
         self.setCentralWidget(tabs)
         self._tabs = tabs
@@ -513,6 +540,7 @@ class MainWindow(QMainWindow):
         self._flag_summary.refresh(all_findings)
         self._challenge_panel.update_findings(all_findings)
         self._timeline_tab.refresh(all_findings)
+        self._attack_plan.update_session(self._session)
 
     def _on_analysis_error(self, path: str, msg: str) -> None:
         if pb := self._progress_by_file.get(path):
@@ -531,6 +559,12 @@ class MainWindow(QMainWindow):
         if finding.offset >= 0:
             self._hex_viewer.highlight_offset(finding.offset, 16)
             self._hex_viewer.jump_to_offset(finding.offset)
+
+    def _on_pin_finding(self, finding: Finding) -> None:
+        """Load a finding's detail into the Transform Pipeline's first node."""
+        panel: TransformPipelinePanel = self._pipeline_dock.widget()
+        panel.load_finding(finding.detail)
+        self._pipeline_dock.setVisible(True)
 
     # ------------------------------------------------------------------
     # Flag preset
@@ -587,6 +621,7 @@ class MainWindow(QMainWindow):
         self._challenge_panel.update_findings(session.findings)
         self._timeline_tab.refresh(session.findings)
         self._network_console.set_session(session)
+        self._attack_plan.update_session(session)
 
     # ------------------------------------------------------------------
     # Network tab
@@ -733,6 +768,64 @@ class MainWindow(QMainWindow):
             self._result_panel.set_ai_client(self._ai_client)
             self._flag_summary.set_ai_client(self._ai_client)
             self._challenge_panel.set_ai_client(self._ai_client)
+            self._attack_plan.set_ai_client(self._ai_client)
+
+    # ------------------------------------------------------------------
+    # Transform Pipeline dock
+    # ------------------------------------------------------------------
+
+    def _build_transform_pipeline_dock(self) -> None:
+        from PyQt6.QtCore import Qt as _Qt
+        self._pipeline_dock = make_transform_pipeline_dock(self, ai_client=self._ai_client)
+        self._pipeline_dock.visibilityChanged.connect(self._on_pipeline_visibility_changed)
+        panel: TransformPipelinePanel = self._pipeline_dock.widget()
+        panel.hypothesis_requested.connect(self._on_pipeline_hypothesis_requested)
+        self.addDockWidget(_Qt.DockWidgetArea.RightDockWidgetArea, self._pipeline_dock)
+
+    def _toggle_transform_pipeline(self, checked: bool) -> None:
+        self._pipeline_dock.setVisible(checked)
+
+    def _on_pipeline_visibility_changed(self, visible: bool) -> None:
+        self._pipeline_toggle_action.setChecked(visible)
+
+    def _on_pipeline_hypothesis_requested(self, final_output: str, transforms: str) -> None:
+        """Forward pipeline output to AI client (if configured) via challenge panel."""
+        context = f"Transform chain applied: {transforms}\n\nFinal output:\n{final_output[:2000]}"
+        self._challenge_panel.set_additional_context(context)
+        self._tabs.setCurrentWidget(self._challenge_panel)
+
+    # ------------------------------------------------------------------
+    # Workspace correlator
+    # ------------------------------------------------------------------
+
+    def _correlate_all_files(self) -> None:
+        from core.workspace_correlator import WorkspaceCorrelator
+        correlator = WorkspaceCorrelator()
+        new_findings = correlator.correlate(self._session)
+        if not new_findings:
+            QMessageBox.information(
+                self, "Correlate All", "No cross-file correlations found."
+            )
+            return
+        # Add correlation findings to the session
+        self._session.findings.extend(new_findings)
+        for f in new_findings:
+            self._findings_by_file.setdefault(f.file, []).append(f)
+
+        # Refresh the currently selected file's results
+        current = self._file_list.currentItem()
+        if current:
+            path = current.data(Qt.ItemDataRole.UserRole)
+            self._result_panel.show_findings(
+                path, self._findings_by_file.get(path, [])
+            )
+        all_findings = [f for flist in self._findings_by_file.values() for f in flist]
+        self._flag_summary.refresh(all_findings)
+        self._attack_plan.update_session(self._session)
+        QMessageBox.information(
+            self, "Correlate All",
+            f"Found {len(new_findings)} cross-file correlation(s)."
+        )
 
     # ------------------------------------------------------------------
     # Drag and drop

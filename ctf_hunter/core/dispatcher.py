@@ -7,10 +7,11 @@ import re
 from pathlib import Path
 from typing import List, Optional
 
-from .report import Finding
+from .report import Finding, Session
 from .deduplicator import deduplicate
 from .external import run_file
 from .ai_client import AIClient
+from .confidence import ConfidenceScorer
 
 # Analyzer imports
 from analyzers.base import Analyzer
@@ -30,6 +31,7 @@ from analyzers.disassembly import DisassemblyAnalyzer
 from analyzers.classical_cipher import ClassicalCipherAnalyzer
 from analyzers.forensics_timeline import ForensicsTimelineAnalyzer
 from analyzers.image_format import ImageFormatAnalyzer
+from analyzers.crypto_rsa import CryptoRSAAnalyzer
 
 # ---------------------------------------------------------------------------
 # Magic byte signatures mapped to analyzer keys
@@ -105,7 +107,17 @@ _ANALYZER_REGISTRY: dict[str, type[Analyzer]] = {
     "classical_cipher": ClassicalCipherAnalyzer,
     "forensics_timeline": ForensicsTimelineAnalyzer,
     "image_format":    ImageFormatAnalyzer,
+    "crypto_rsa":      CryptoRSAAnalyzer,
 }
+
+# PEM/DER/RSA detection patterns
+_PEM_RE = re.compile(rb"-----BEGIN [A-Z ]+-----")
+_DER_HEADER = b"\x30\x82"  # ASN.1 SEQUENCE tag with 2-byte length
+_RSA_PAIR_RE = re.compile(
+    rb"(?:(?:0x[0-9a-fA-F]{64,})|(?:[0-9]{100,}))"
+)
+
+_CONFIDENCE_SCORER = ConfidenceScorer()
 
 
 def dispatch(
@@ -116,8 +128,77 @@ def dispatch(
 ) -> List[Finding]:
     """
     Identify file type, select all applicable analyzers, run them, and return
-    deduplicated findings. GenericAnalyzer always runs.
+    deduplicated findings.  GenericAnalyzer always runs.
+
+    Modes:
+      fast  – Quick targeted checks.
+      deep  – Exhaustive checks.
+      auto  – Run fast first; re-run only relevant analyzers in deep mode
+              for regions with findings confidence >= 0.6.
     """
+    if depth == "auto":
+        return _dispatch_auto(path, flag_pattern, ai_client)
+
+    findings = _run_dispatch(path, flag_pattern, depth, ai_client)
+    _score_findings(findings, flag_pattern, depth)
+    return findings
+
+
+def _dispatch_auto(
+    path: str,
+    flag_pattern: re.Pattern,
+    ai_client: Optional[AIClient],
+) -> List[Finding]:
+    """AUTO mode: fast first, then deep only for high-confidence regions."""
+    # Phase 1: fast
+    fast_findings = _run_dispatch(path, flag_pattern, "fast", ai_client)
+    _score_findings(fast_findings, flag_pattern, "fast")
+
+    # Identify high-confidence findings and the analyzers responsible
+    high_conf = [f for f in fast_findings if f.confidence >= 0.6 and f.duplicate_of is None]
+    if not high_conf:
+        return fast_findings
+
+    responsible_analyzers: set[str] = {f.analyzer for f in high_conf}
+    high_conf_offsets: list[int] = [f.offset for f in high_conf if f.offset >= 0]
+
+    # Phase 2: deep, scoped to responsible analyzers
+    deep_findings = _run_dispatch(
+        path, flag_pattern, "deep", ai_client,
+        restrict_analyzers=responsible_analyzers,
+    )
+    _score_findings(deep_findings, flag_pattern, "deep")
+
+    # Merge: start with fast findings, add deep findings not already covered
+    fast_ids = {f.id for f in fast_findings}
+    merged = list(fast_findings)
+    for f in deep_findings:
+        # Skip analyzers that produced zero findings in fast and aren't corroborated
+        analyzer_had_fast = any(
+            ff.analyzer == f.analyzer for ff in fast_findings if ff.duplicate_of is None
+        )
+        if not analyzer_had_fast:
+            # Only include if there's a corroborating analyzer at the same region
+            if f.offset >= 0 and any(
+                abs(f.offset - off) <= 32 for off in high_conf_offsets
+            ):
+                merged.append(f)
+        else:
+            merged.append(f)
+
+    deduped = deduplicate(merged)
+    _score_findings(deduped, flag_pattern, "deep")
+    return deduped
+
+
+def _run_dispatch(
+    path: str,
+    flag_pattern: re.Pattern,
+    depth: str,
+    ai_client: Optional[AIClient],
+    restrict_analyzers: Optional[set] = None,
+) -> List[Finding]:
+    """Run all applicable analyzers at the given depth, optionally restricted."""
     data = _read_header(path)
     keys = _identify_analyzers(path, data)
 
@@ -127,15 +208,20 @@ def dispatch(
     generic = GenericAnalyzer()
     all_findings.extend(generic.analyze(path, flag_pattern, depth, ai_client))
 
-    # Always run encoding, crypto, classical_cipher, and forensics_timeline
-    for key in ("encoding", "crypto", "classical_cipher", "forensics_timeline"):
+    # Always-run analyzers
+    always_run = ("encoding", "crypto", "classical_cipher", "forensics_timeline")
+    for key in always_run:
+        if restrict_analyzers is not None and key not in restrict_analyzers:
+            continue
         analyzer = _ANALYZER_REGISTRY[key]()
         all_findings.extend(analyzer.analyze(path, flag_pattern, depth, ai_client))
 
-    # Run type-specific analyzers
+    # Type-specific analyzers
     for key in keys:
-        if key in ("encoding", "crypto", "classical_cipher", "forensics_timeline"):
-            continue   # already ran above
+        if key in always_run:
+            continue
+        if restrict_analyzers is not None and key not in restrict_analyzers:
+            continue
         cls = _ANALYZER_REGISTRY.get(key)
         if cls:
             try:
@@ -152,6 +238,21 @@ def dispatch(
                 ))
 
     return deduplicate(all_findings)
+
+
+def _score_findings(
+    findings: List[Finding],
+    flag_pattern: re.Pattern,
+    depth: str,
+) -> None:
+    """Apply confidence scoring in-place using a temporary Session wrapper."""
+    from .report import Session
+    tmp_session = Session(findings=findings)
+    try:
+        tmp_session.flag_pattern = flag_pattern.pattern
+    except Exception:
+        pass
+    _CONFIDENCE_SCORER.score_session(tmp_session)
 
 
 def _read_header(path: str) -> bytes:
@@ -188,5 +289,15 @@ def _identify_analyzers(path: str, data: bytes) -> list[str]:
     # PCAP extension fallback
     if Path(path).suffix.lower() in (".pcap", ".pcapng", ".cap") and "pcap" not in keys:
         keys.append("pcap")
+
+    # PEM / DER / RSA detection
+    full_data = data  # header is 512 bytes; enough for PEM begin marker
+    if _PEM_RE.search(full_data) or full_data[:2] == _DER_HEADER or _RSA_PAIR_RE.search(full_data):
+        if "crypto_rsa" not in keys:
+            keys.append("crypto_rsa")
+    # Also check file extension for .pem / .der / .key / .crt / .csr
+    if Path(path).suffix.lower() in (".pem", ".der", ".key", ".crt", ".csr", ".pub"):
+        if "crypto_rsa" not in keys:
+            keys.append("crypto_rsa")
 
     return keys

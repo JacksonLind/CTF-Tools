@@ -2,11 +2,13 @@
 Binary analyzer: ELF/PE headers, packed sections, overlay data, suspicious imports.
 Extended with comprehensive flag decoding: XOR brute-force, Base64, ROT13, hex,
 reversed bytes, cross-section reconstruction, entropy/decompression, and debug strings.
+Extended further with ROP gadget scanner, format string detector, and optional angr integration.
 """
 from __future__ import annotations
 
 import base64
 import codecs
+import logging
 import lzma
 import math
 import re
@@ -20,6 +22,25 @@ from core.report import Finding
 from core.ai_client import AIClient
 from core.external import run_strings
 from .base import Analyzer
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Optional imports — graceful degradation
+# ---------------------------------------------------------------------------
+try:
+    import capstone as _capstone
+    _CAPSTONE_AVAILABLE = True
+except ImportError:
+    _CAPSTONE_AVAILABLE = False
+    logger.info("capstone not installed; ROP gadget scanner disabled.")
+
+try:
+    import angr as _angr
+    _ANGR_AVAILABLE = True
+except ImportError:
+    _ANGR_AVAILABLE = False
+    logger.info("angr not installed; symbolic execution disabled.")
 
 _SUSPICIOUS_IMPORTS = {
     "VirtualAlloc", "VirtualAllocEx", "WriteProcessMemory", "CreateRemoteThread",
@@ -193,6 +214,18 @@ class BinaryAnalyzer(Analyzer):
 
         # Suspicious imports via strings
         findings.extend(self._check_imports(path, flag_pattern))
+
+        # ROP gadget scanner (deep mode or ELF/PE binaries)
+        if sections and (depth == "deep" or fmt in ("ELF", "PE")):
+            findings.extend(self._scan_rop_gadgets(path, sections, fmt))
+
+        # Format string vulnerability detector
+        strings_all = run_strings(path, min_len=3) if depth == "deep" else run_strings(path, min_len=4)
+        findings.extend(self._detect_format_strings(path, strings_all, data, sections, fmt))
+
+        # angr symbolic execution (deep mode only, optional)
+        if depth == "deep" and fmt == "ELF":
+            findings.extend(self._angr_analysis(path))
 
         return findings
 
@@ -919,4 +952,270 @@ class BinaryAnalyzer(Analyzer):
                     flag_match=True,
                     confidence=0.95,
                 ))
+        return findings
+
+    # ------------------------------------------------------------------
+    # ROP gadget scanner
+    # ------------------------------------------------------------------
+
+    def _scan_rop_gadgets(
+        self,
+        path: str,
+        sections: List[_SectionInfo],
+        fmt: str,
+    ) -> List[Finding]:
+        """
+        Walk executable sections for ret/jmp/call gadgets.
+        Reports count, density, and top 20 most useful gadgets.
+        Requires capstone; gracefully degrades if not available.
+        """
+        findings: List[Finding] = []
+
+        if not _CAPSTONE_AVAILABLE:
+            findings.append(self._finding(
+                path,
+                "ROP gadget scan skipped (capstone not installed)",
+                "Install capstone: pip install capstone",
+                severity="INFO",
+                confidence=0.3,
+            ))
+            return findings
+
+        try:
+            import capstone as cs
+        except ImportError:
+            return findings
+
+        # Determine architecture from magic / section format
+        if fmt == "ELF":
+            md = cs.Cs(cs.CS_ARCH_X86, cs.CS_MODE_64)
+        elif fmt == "PE":
+            md = cs.Cs(cs.CS_ARCH_X86, cs.CS_MODE_32)
+        else:
+            md = cs.Cs(cs.CS_ARCH_X86, cs.CS_MODE_64)
+        md.detail = True
+
+        all_gadgets: List[str] = []
+        total_bytes = 0
+
+        # Useful gadget patterns (mnemonic, op_str hint)
+        useful_patterns = {
+            ("pop", "ret"),     # pop reg; ret
+            ("syscall", ""),    # syscall; ret
+            ("int", "0x80"),    # int 0x80; ret
+            ("mov", "ret"),     # mov reg; ret
+        }
+
+        for sec in sections:
+            # Only executable sections
+            exec_names = {".text", ".plt", ".init", ".fini"}
+            if sec.name not in exec_names and sec.fmt != "PE":
+                # For PE, scan all sections; for ELF only known exec sections
+                if fmt == "ELF":
+                    continue
+
+            data = sec.data
+            total_bytes += len(data)
+            offset = sec.file_offset
+
+            # Find all RET instructions and walk back up to 5 bytes for gadgets
+            ret_offsets = [i for i, b in enumerate(data) if b == 0xC3]  # RET
+            for ret_off in ret_offsets[:500]:  # limit to 500 ret sites
+                for look_back in range(1, 6):
+                    start = ret_off - look_back
+                    if start < 0:
+                        continue
+                    chunk = data[start:ret_off + 1]
+                    try:
+                        insns = list(md.disasm(chunk, offset + start))
+                        if not insns or insns[-1].mnemonic not in ("ret", "retn"):
+                            continue
+                        gadget_str = "; ".join(f"{i.mnemonic} {i.op_str}".strip() for i in insns)
+                        all_gadgets.append(gadget_str)
+                    except Exception:
+                        pass
+
+        if not all_gadgets:
+            return findings
+
+        # Count and density
+        unique_gadgets = list(dict.fromkeys(all_gadgets))
+        density = len(all_gadgets) / max(total_bytes, 1) * 1000  # per KB
+
+        # Score gadgets by usefulness
+        def _gadget_score(g: str) -> int:
+            score = 0
+            if "pop" in g and "ret" in g:
+                score += 3
+            if "syscall" in g or "int 0x80" in g:
+                score += 5
+            if "mov" in g and "ret" in g:
+                score += 2
+            if "xor" in g and "ret" in g:
+                score += 2
+            return score
+
+        top_20 = sorted(unique_gadgets, key=_gadget_score, reverse=True)[:20]
+
+        findings.append(self._finding(
+            path,
+            f"ROP gadgets found: {len(unique_gadgets)} unique ({density:.1f}/KB)",
+            (
+                f"Total gadget instances: {len(all_gadgets)}\n"
+                f"Unique gadgets: {len(unique_gadgets)}\n"
+                f"Density: {density:.2f} per KB\n\n"
+                f"Top 20 useful gadgets:\n"
+                + "\n".join(f"  {g}" for g in top_20)
+            ),
+            severity="HIGH" if density > 5 else "MEDIUM",
+            confidence=0.75,
+        ))
+
+        return findings
+
+    # ------------------------------------------------------------------
+    # Format string detector
+    # ------------------------------------------------------------------
+
+    _FORMAT_STRING_PATTERNS = [
+        re.compile(r"%n"),
+        re.compile(r"(%s){3,}"),
+        re.compile(r"(%x){3,}"),
+        re.compile(r"(%d){3,}"),
+        re.compile(r"(%p){2,}"),
+    ]
+
+    _FORMAT_CALL_FUNCS = re.compile(
+        r"\b(printf|fprintf|sprintf|snprintf|syslog|vprintf|vfprintf"
+        r"|vsprintf|vsnprintf|wprintf|fwprintf)\b"
+    )
+
+    def _detect_format_strings(
+        self,
+        path: str,
+        strings: List[str],
+        data: bytes,
+        sections: List[_SectionInfo],
+        fmt: str,
+    ) -> List[Finding]:
+        """
+        Scan strings section and extracted strings for dangerous format string patterns.
+        Flag suspected vulnerable call sites in disassembly output.
+        """
+        findings: List[Finding] = []
+        suspect_strings: List[str] = []
+
+        for s in strings:
+            for pat in self._FORMAT_STRING_PATTERNS:
+                if pat.search(s):
+                    suspect_strings.append(s)
+                    break
+
+        if not suspect_strings:
+            return findings
+
+        # Check if binary uses printf-family functions
+        all_text = " ".join(strings)
+        has_format_funcs = bool(self._FORMAT_CALL_FUNCS.search(all_text))
+
+        detail = (
+            f"Suspicious format strings found ({len(suspect_strings)} total):\n"
+            + "\n".join(f"  {s[:80]!r}" for s in suspect_strings[:10])
+        )
+        if has_format_funcs:
+            detail += "\n\nBinary also contains printf-family function references → possible format string vulnerability."
+            severity = "HIGH"
+            confidence = 0.82
+        else:
+            severity = "MEDIUM"
+            confidence = 0.60
+
+        findings.append(self._finding(
+            path,
+            f"Format string vulnerability pattern detected ({len(suspect_strings)} strings)",
+            detail,
+            severity=severity,
+            confidence=confidence,
+        ))
+
+        return findings
+
+    # ------------------------------------------------------------------
+    # angr symbolic execution (optional)
+    # ------------------------------------------------------------------
+
+    def _angr_analysis(self, path: str) -> List[Finding]:
+        """
+        Use angr to find paths to win/flag/system functions and report
+        symbolic constraints on stdin.  Gracefully degrades if angr is not installed.
+        """
+        findings: List[Finding] = []
+
+        if not _ANGR_AVAILABLE:
+            findings.append(self._finding(
+                path,
+                "Symbolic execution skipped (angr not installed)",
+                "Install angr: pip install angr",
+                severity="INFO",
+                confidence=0.2,
+            ))
+            return findings
+
+        try:
+            proj = _angr.Project(path, auto_load_libs=False)
+            cfg = proj.analyses.CFGFast()
+
+            # Look for functions named win, flag, system, execve, etc.
+            target_names = {"win", "flag", "system", "execve", "shell", "get_flag"}
+            targets = []
+            for func in cfg.kb.functions.values():
+                if func.name and any(t in func.name.lower() for t in target_names):
+                    targets.append(func)
+
+            if not targets:
+                findings.append(self._finding(
+                    path,
+                    "angr: no obvious win/flag function found",
+                    "CFG analysis completed; no functions matching win/flag/system pattern.",
+                    severity="INFO",
+                    confidence=0.3,
+                ))
+                return findings
+
+            for target_func in targets[:3]:
+                state = proj.factory.entry_state(
+                    stdin=_angr.SimFileStream,
+                )
+                simgr = proj.factory.simgr(state)
+                try:
+                    simgr.explore(find=target_func.addr, num_find=1)
+                except Exception:
+                    pass
+
+                if simgr.found:
+                    found_state = simgr.found[0]
+                    try:
+                        stdin_bytes = found_state.posix.stdin.load(0, found_state.posix.stdin.size)
+                        stdin_concrete = found_state.solver.eval(stdin_bytes, cast_to=bytes)
+                        constraint_str = stdin_concrete.decode("utf-8", errors="replace")[:200]
+                    except Exception:
+                        constraint_str = "(could not concretize stdin)"
+
+                    findings.append(self._finding(
+                        path,
+                        f"angr: path found to {target_func.name}() at 0x{target_func.addr:x}",
+                        f"Stdin constraint: {constraint_str!r}",
+                        severity="HIGH",
+                        confidence=0.85,
+                    ))
+
+        except Exception as exc:
+            findings.append(self._finding(
+                path,
+                "angr analysis failed",
+                str(exc),
+                severity="INFO",
+                confidence=0.1,
+            ))
+
         return findings
