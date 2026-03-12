@@ -45,6 +45,7 @@ from ui.network_console import NetworkConsoleTab
 from ui.timeline_tab import TimelineTab
 from ui.transform_pipeline import make_transform_pipeline_dock, TransformPipelinePanel
 from ui.attack_plan_tab import AttackPlanTab
+from ui.help_tab import HelpTab
 
 # ---------------------------------------------------------------------------
 # Worker signals / runnable
@@ -333,6 +334,10 @@ class MainWindow(QMainWindow):
         # --- Tab 8: Attack Plan ---
         self._attack_plan = AttackPlanTab(ai_client=self._ai_client)
         tabs.addTab(self._attack_plan, "⚔️ Attack Plan")
+
+        # --- Tab 9: Help ---
+        self._help_tab = HelpTab()
+        tabs.addTab(self._help_tab, "❓ Help")
 
         self.setCentralWidget(tabs)
         self._tabs = tabs
