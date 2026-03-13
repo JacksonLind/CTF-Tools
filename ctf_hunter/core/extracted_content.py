@@ -18,6 +18,9 @@ MAX_DEPTH = 5
 # Matches a contiguous run of hex digits following the "raw_hex=" key.
 _RAW_HEX_RE = re.compile(r"raw_hex=([0-9a-fA-F]+)")
 
+# Regex to validate that a byte string contains only valid base64 characters.
+_BASE64_RE = re.compile(rb'^[A-Za-z0-9+/]+=*$')
+
 
 @dataclass
 class ExtractedContent:
@@ -73,18 +76,23 @@ def extract_from_finding(finding) -> list[ExtractedContent]:
 
         encoding_chain = ["raw_hex"]
 
-        # Strip a 2-byte big-endian length prefix when its value exactly equals
-        # the number of remaining bytes.  This handles payloads produced by
-        # tools (e.g. steghide-style LSB encoders) that prepend a uint16 BE
-        # length field to the actual content.  Without stripping, the extra
-        # bytes corrupt the base64 alphabet ratio check in the classifier,
-        # causing the downstream XOR brute-forcer to operate on the raw base64
-        # characters instead of the decoded payload.
-        if len(data) > 2:
+        # Strip a 2-byte big-endian length prefix when the declared length fits
+        # within the remaining data and the extracted slice passes a base64
+        # alphabet check.  This handles payloads produced by tools (e.g.
+        # steghide-style LSB encoders) that prepend a uint16 BE length field
+        # followed by trailing padding/null bytes.  The original exact-match
+        # guard (declared_length == len(data) - 2) failed whenever trailing
+        # bytes such as 0x55 runs or null bytes were appended after the base64
+        # payload, because len(data) - 2 was much larger than declared_length.
+        # A prefix-match with a base64 alphabet validation correctly isolates
+        # the payload regardless of trailing data.
+        if len(data) >= 3:
             declared_length = int.from_bytes(data[:2], "big")
-            if declared_length > 0 and declared_length == len(data) - 2:
-                data = data[2:]
-                encoding_chain.append("length_prefix_stripped")
+            if declared_length > 0 and len(data) >= declared_length + 2:
+                candidate = data[2:2 + declared_length]
+                if _BASE64_RE.match(candidate):
+                    data = candidate
+                    encoding_chain.append("length_prefix_stripped")
 
         content_hash = hashlib.sha256(data).hexdigest()
         label = f"raw_hex extract from finding '{getattr(finding, 'title', '')}'"
