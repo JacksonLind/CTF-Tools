@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QLabel, QProgressBar, QToolBar,
     QComboBox, QPushButton, QCheckBox, QMenu, QTabWidget,
     QFileDialog, QMessageBox, QTextEdit, QApplication, QLineEdit,
-    QDialog, QInputDialog,
+    QDialog, QInputDialog, QDockWidget,
 )
 from PyQt6.QtCore import (
     Qt, QThreadPool, QRunnable, QObject, pyqtSignal, pyqtSlot, QTimer,
@@ -115,8 +115,10 @@ class MainWindow(QMainWindow):
         self._thread_pool.setMaxThreadCount(4)
         self._watchfolder = WatchfolderManager(self)
         self._watchfolder.file_detected.connect(self._on_watchfolder_file)
+        self._watchfolder.file_skipped.connect(self._on_watchfolder_skip)
         self._watchfolder_active = False
         self._diff_first_file: Optional[str] = None
+        self._frida_timeout_seconds: int = 10
 
         # AI / config
         cfg = load_config()
@@ -129,6 +131,9 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_central()
         self._build_transform_pipeline_dock()
+        self._build_session_diff_dock()
+        self._build_frida_results_dock()
+        self._build_menu_bar()
 
         # Update tool dots
         self._update_tool_status()
@@ -190,6 +195,11 @@ class MainWindow(QMainWindow):
         act_load = QAction("📂 Load Session", self)
         act_load.triggered.connect(self._load_session)
         tb.addAction(act_load)
+
+        act_compare = QAction("🔀 Compare Session", self)
+        act_compare.setToolTip("Compare current session with another .ctfs file")
+        act_compare.triggered.connect(self._compare_session)
+        tb.addAction(act_compare)
 
         tb.addSeparator()
 
@@ -304,6 +314,17 @@ class MainWindow(QMainWindow):
         splitter_h.setSizes([250, 950])
 
         main_layout.addWidget(splitter_h)
+
+        # "Run Dynamic Analysis" button — explicit opt-in only, never auto-run
+        self._frida_btn = QPushButton("🔬 Run Dynamic Analysis (Frida)")
+        self._frida_btn.setToolTip(
+            "Run Frida-based runtime instrumentation on the selected binary.\n"
+            "Requires frida to be installed (pip install frida frida-tools).\n"
+            "Only works on ELF and PE files."
+        )
+        self._frida_btn.clicked.connect(self._run_dynamic_analysis)
+        main_layout.addWidget(self._frida_btn)
+
         tabs.addTab(main_tab, "📋 Analysis")
 
         # --- Tab 2: Flag Summary ---
@@ -628,6 +649,124 @@ class MainWindow(QMainWindow):
         self._network_console.set_session(session)
         self._attack_plan.update_session(session)
 
+    def _compare_session(self) -> None:
+        """Open a second .ctfs file and show a session diff panel."""
+        from core.session_diff import diff_sessions
+        from ui.session_diff_panel import SessionDiffPanel
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Session to Compare", "", "CTF Hunter Session (*.ctfs);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            session_b = Session.load(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Load Error", f"Failed to load session:\n{exc}")
+            return
+
+        diff = diff_sessions(self._session, session_b)
+
+        panel = SessionDiffPanel(
+            diff,
+            label_a="Current session",
+            label_b=Path(path).name,
+            parent=self,
+        )
+        # Reuse the persistent diff dock so its View-menu toggle remains valid
+        # across multiple comparisons.
+        self._diff_dock.setWidget(panel)
+        self._diff_dock.show()
+        self._diff_dock.raise_()
+
+    # ------------------------------------------------------------------
+    # Dynamic Frida analysis
+    # ------------------------------------------------------------------
+
+    def _run_dynamic_analysis(self) -> None:
+        """Run Frida instrumentation on the currently selected binary — explicit opt-in."""
+        item = self._file_list.currentItem()
+        if not item:
+            QMessageBox.information(self, "Dynamic Analysis", "Select a file in the list first.")
+            return
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+
+        # Optional frida args
+        args_str, ok = QInputDialog.getText(
+            self, "Frida Arguments",
+            "Optional arguments for the target binary (space-separated):",
+            text="",
+        )
+        if not ok:
+            return
+        frida_args: List[str] = args_str.strip().split() if args_str.strip() else []
+        self._run_frida_worker(path, frida_args)
+
+    def _run_frida_worker(self, path: str, frida_args: List[str]) -> None:
+        """Spawn the Frida analyzer in a thread pool worker."""
+        class _FridaSignals(QObject):
+            finished = pyqtSignal(str, list)
+            error = pyqtSignal(str, str)
+
+        class _FridaWorker(QRunnable):
+            def __init__(self, _path, _flag_re, _ai_client, _args, _timeout):
+                super().__init__()
+                self.signals = _FridaSignals()
+                self._path = _path
+                self._flag_re = _flag_re
+                self._ai_client = _ai_client
+                self._frida_args = _args
+                self._timeout = _timeout
+
+            @pyqtSlot()
+            def run(self):
+                try:
+                    from analyzers.dynamic_frida import FridaAnalyzer
+                    findings = FridaAnalyzer().analyze(
+                        self._path,
+                        self._flag_re,
+                        "deep",
+                        self._ai_client,
+                        frida_args=self._frida_args,
+                        timeout_seconds=self._timeout,
+                    )
+                    self.signals.finished.emit(self._path, findings)
+                except Exception as exc:
+                    self.signals.error.emit(self._path, str(exc))
+
+        try:
+            flag_re = re.compile(self._session.flag_pattern, re.IGNORECASE)
+        except re.error:
+            flag_re = re.compile(r"CTF\{[^}]+\}", re.IGNORECASE)
+
+        worker = _FridaWorker(path, flag_re, self._ai_client, frida_args,
+                              self._frida_timeout_seconds)
+        worker.signals.finished.connect(self._on_frida_analysis_done)
+        worker.signals.error.connect(self._on_analysis_error)
+        self._thread_pool.start(worker)
+
+    def _on_frida_analysis_done(self, path: str, findings: List[Finding]) -> None:
+        """Handle Frida analysis completion: update main result panel and show Frida dock."""
+        self._on_analysis_done(path, findings)
+        # Populate the dedicated Frida results dock with a human-readable summary
+        frida_findings = [f for f in findings if f.analyzer == "FridaAnalyzer"]
+        lines: List[str] = [f"Dynamic analysis results for:\n{path}\n"]
+        if frida_findings:
+            for f in frida_findings:
+                flag_icon = "🚩 " if f.flag_match else ""
+                lines.append(f"[{f.severity}] {flag_icon}{f.title}")
+                if f.detail:
+                    detail = f.detail[:300] + ("…" if len(f.detail) > 300 else "")
+                    lines.append(f"  {detail}")
+                lines.append("")
+        else:
+            lines.append("No findings from dynamic analysis.")
+        self._frida_results_text.setPlainText("\n".join(lines))
+        self._frida_dock.show()
+        self._frida_dock.raise_()
+
     # ------------------------------------------------------------------
     # Network tab
     # ------------------------------------------------------------------
@@ -658,6 +797,9 @@ class MainWindow(QMainWindow):
                 self._watchfolder_btn.setChecked(False)
                 return
             self._session.watchfolder_path = directory
+            # Apply current max_file_mb from config
+            cfg = load_config()
+            self._watchfolder.max_file_mb = float(cfg.get("max_file_mb", 50))
             self._watchfolder.start(directory)
             self._watchfolder_btn.setText("📁 Watchfolder ON ●")
             self._watchfolder_btn.setStyleSheet("color: green;")
@@ -669,8 +811,14 @@ class MainWindow(QMainWindow):
             self._watchfolder_active = False
 
     def _on_watchfolder_file(self, path: str) -> None:
+        """Called (via Qt signal) when a new file passes debounce + size gate."""
         self._add_file(path)
         self._analyze_file(path)
+
+    def _on_watchfolder_skip(self, path: str, reason: str) -> None:
+        """Called (via Qt signal) when a file is skipped by the size gate."""
+        msg = f"Watchfolder skipped: {Path(path).name} — {reason}"
+        self.statusBar().showMessage(msg, 8000)
 
     # ------------------------------------------------------------------
     # Export
@@ -774,6 +922,10 @@ class MainWindow(QMainWindow):
             self._flag_summary.set_ai_client(self._ai_client)
             self._challenge_panel.set_ai_client(self._ai_client)
             self._attack_plan.set_ai_client(self._ai_client)
+            # Propagate watchfolder size limit
+            self._watchfolder.max_file_mb = dlg.get_max_file_mb()
+            # Store frida timeout
+            self._frida_timeout_seconds = dlg.get_frida_timeout_seconds()
 
     # ------------------------------------------------------------------
     # Transform Pipeline dock
@@ -798,6 +950,95 @@ class MainWindow(QMainWindow):
         context = f"Transform chain applied: {transforms}\n\nFinal output:\n{final_output[:2000]}"
         self._challenge_panel.set_additional_context(context)
         self._tabs.setCurrentWidget(self._challenge_panel)
+
+    # ------------------------------------------------------------------
+    # Session Diff dock
+    # ------------------------------------------------------------------
+
+    def _build_session_diff_dock(self) -> None:
+        """Create the persistent Session Diff dock (initially hidden).
+
+        The dock is shown and its content replaced each time _compare_session()
+        runs.  Its toggleViewAction() is registered in the View menu so users
+        can re-show a diff that was accidentally closed without re-running the
+        comparison.
+        """
+        placeholder = QLabel("Use '🔀 Compare Session' to load a session diff.")
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder.setStyleSheet("color: #888; padding: 20px;")
+
+        self._diff_dock = QDockWidget("🔀 Session Diff", self)
+        self._diff_dock.setAllowedAreas(
+            Qt.DockWidgetArea.BottomDockWidgetArea | Qt.DockWidgetArea.TopDockWidgetArea
+        )
+        self._diff_dock.setWidget(placeholder)
+        self._diff_dock.setMinimumHeight(300)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._diff_dock)
+        self._diff_dock.hide()
+
+    # ------------------------------------------------------------------
+    # Frida results dock
+    # ------------------------------------------------------------------
+
+    def _build_frida_results_dock(self) -> None:
+        """Create the persistent Dynamic Analysis (Frida) results dock (initially hidden).
+
+        The dock is shown and populated each time a Frida analysis completes.
+        Its toggleViewAction() is registered in the View menu so users can
+        re-open the panel after closing it.
+        """
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(4, 4, 4, 4)
+
+        hdr = QLabel("🔬 Dynamic Analysis (Frida) Results")
+        hdr.setStyleSheet("font-weight: bold; padding: 4px;")
+        layout.addWidget(hdr)
+
+        self._frida_results_text = QTextEdit()
+        self._frida_results_text.setReadOnly(True)
+        self._frida_results_text.setPlaceholderText(
+            "Run '🔬 Run Dynamic Analysis (Frida)' on a binary to see results here."
+        )
+        layout.addWidget(self._frida_results_text)
+
+        self._frida_dock = QDockWidget("🔬 Dynamic Analysis Results", self)
+        self._frida_dock.setAllowedAreas(
+            Qt.DockWidgetArea.BottomDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self._frida_dock.setWidget(container)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._frida_dock)
+        self._frida_dock.hide()
+
+    # ------------------------------------------------------------------
+    # View menu (menu bar)
+    # ------------------------------------------------------------------
+
+    def _build_menu_bar(self) -> None:
+        """Build the application menu bar with a View menu for dock panel toggles.
+
+        All three dockable panels are registered here so users can toggle them
+        from a single, discoverable location even if they have been closed.
+        """
+        mb = self.menuBar()
+        view_menu = mb.addMenu("View")
+
+        # Session Diff panel — uses the dock's own toggleViewAction() so Qt
+        # keeps the checked state in sync with actual dock visibility automatically.
+        diff_action = self._diff_dock.toggleViewAction()
+        diff_action.setText("Session Diff Panel")
+        view_menu.addAction(diff_action)
+
+        # Dynamic Analysis (Frida) results panel
+        frida_action = self._frida_dock.toggleViewAction()
+        frida_action.setText("Dynamic Analysis Results")
+        view_menu.addAction(frida_action)
+
+        view_menu.addSeparator()
+
+        # Transform Pipeline — the same QAction already present in the toolbar,
+        # mirrored here so the View menu is the single place to find all panels.
+        view_menu.addAction(self._pipeline_toggle_action)
 
     # ------------------------------------------------------------------
     # Workspace correlator

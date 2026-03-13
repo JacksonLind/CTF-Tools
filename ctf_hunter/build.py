@@ -2,6 +2,14 @@
 """
 Build script: packages CTF Hunter into a single executable using PyInstaller.
 Run: python build.py
+
+Optional Frida support
+----------------------
+If frida is installed (pip install frida frida-tools), the dynamic analysis
+analyzer (analyzers/dynamic_frida.py) will be active at runtime.  The
+PyInstaller bundle does not embed frida automatically; users who want dynamic
+analysis should install frida in the Python environment that runs CTF Hunter
+rather than relying on the bundled executable.
 """
 from __future__ import annotations
 
@@ -14,9 +22,50 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 
 
+def _ensure_frida_downloaded() -> None:
+    """Attempt to pip-install frida if available in the current environment.
+
+    This is a best-effort operation that must never raise an exception or set a
+    non-zero exit code — a frida install failure must not abort the PyInstaller
+    build.
+    """
+    try:
+        import frida  # noqa: F401 — already installed
+        print("  frida already installed; dynamic analysis will be available.")
+        return
+    except ImportError:
+        pass
+    print("Optional: attempting to install frida for dynamic analysis support…")
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet", "frida", "frida-tools"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            print("  frida installed successfully.")
+        else:
+            # Log the failure clearly so CI/build logs surface it, but continue.
+            print(
+                f"  WARNING: frida install failed (exit code {result.returncode}). "
+                "Dynamic analysis will be unavailable in the built executable.\n"
+                f"  pip stderr: {result.stderr.strip()}"
+            )
+    except Exception as exc:
+        # e.g. pip binary not found or permission error — still not fatal
+        print(
+            f"  WARNING: frida install skipped due to unexpected error: {exc}. "
+            "Dynamic analysis will be unavailable in the built executable."
+        )
+
+
 def main() -> None:
     dist_path = ROOT / "dist"
     build_path = ROOT / "build_pyinstaller"
+
+    # Try to make frida available in the build environment (best-effort)
+    _ensure_frida_downloaded()
 
     args = [
         sys.executable, "-m", "PyInstaller",
