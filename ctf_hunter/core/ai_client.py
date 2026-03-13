@@ -59,6 +59,21 @@ class AIClient:
         except Exception as exc:
             return f"[AI error: {exc}]"
 
+    def complete_with_system(self, system_prompt: str, user_message: str) -> str:
+        """Send a message with an explicit system prompt; returns raw response text."""
+        if not self.available:
+            return ""
+        try:
+            response = self._client.messages.create(
+                model=MODEL,
+                max_tokens=MAX_TOKENS,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_message}],
+            )
+            return response.content[0].text if response.content else ""
+        except Exception as exc:
+            return f"[AI error: {exc}]"
+
     def analyze_findings(
         self,
         file_path: str,
