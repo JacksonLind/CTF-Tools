@@ -15,6 +15,7 @@ confidence ≥ ExploitGenerator.MIN_CONFIDENCE.
 from __future__ import annotations
 
 import os
+import re
 from typing import List, Optional
 
 from PyQt6.QtCore import Qt, QProcess, QSize, pyqtSignal
@@ -116,7 +117,8 @@ class _CommandBlock(QWidget):
 class _HypothesisCard(QFrame):
     """Expandable card widget representing a single Hypothesis."""
 
-    exploit_requested = pyqtSignal(object)  # emits Hypothesis
+    exploit_requested     = pyqtSignal(object)  # emits Hypothesis (pwn)
+    rsa_exploit_requested = pyqtSignal(object)  # emits Hypothesis (crypto)
 
     def __init__(self, hyp: Hypothesis, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -243,6 +245,18 @@ class _HypothesisCard(QFrame):
             )
             exploit_btn.clicked.connect(lambda: self.exploit_requested.emit(self._hyp))
             body_layout.addWidget(exploit_btn)
+
+        # RSA script generator button (crypto category, confidence ≥ threshold)
+        if (
+            hyp.category.lower() == "crypto"
+            and hyp.confidence >= ExploitGenerator.MIN_CONFIDENCE
+        ):
+            rsa_btn = QPushButton("🔑 Generate RSA Attack Script")
+            rsa_btn.setToolTip(
+                "Generate a Python RSA attack script (small-e / factorable-N / common-modulus)"
+            )
+            rsa_btn.clicked.connect(lambda: self.rsa_exploit_requested.emit(self._hyp))
+            body_layout.addWidget(rsa_btn)
 
         # Command output area (hidden until a Run Command is triggered)
         self._output = QTextEdit()
@@ -386,6 +400,7 @@ class AttackPlanTab(QWidget):
         for hyp in self._hypotheses:
             card = _HypothesisCard(hyp)
             card.exploit_requested.connect(self._on_exploit_requested)
+            card.rsa_exploit_requested.connect(self._on_rsa_exploit_requested)
             # Insert before the trailing stretch
             self._cards_layout.insertWidget(self._cards_layout.count() - 1, card)
 
@@ -432,6 +447,49 @@ class AttackPlanTab(QWidget):
                 "Exploit Generated",
                 f"Exploit script saved to:\n{save_path}\n\n"
                 "Update BINARY, OFFSET, REMOTE_HOST/PORT and libc path before running.",
+            )
+        except OSError as exc:
+            QMessageBox.critical(self, "Save Failed", str(exc))
+
+    def _on_rsa_exploit_requested(self, hyp: Hypothesis) -> None:
+        """Generate a Python RSA attack script for the given crypto hypothesis."""
+        # Build a minimal ExploitContext for RSA — no binary required
+        # Map hypothesis title to attack type for the generator
+        title_lower = hyp.title.lower()
+        if "small" in title_lower and ("e" in title_lower or "exponent" in title_lower):
+            attack_type: Optional[str] = "small_e"
+        elif re.search(r"\bfactor(ed|able)?\b", title_lower):
+            attack_type = "factorable_n"
+        elif "common modulus" in title_lower or "common_modulus" in title_lower:
+            attack_type = "common_modulus"
+        else:
+            attack_type = None  # include all three stubs
+
+        ctx = ExploitContext(
+            binary_path="challenge",
+            rsa_attack_type=attack_type,
+        )
+        script = self._exploit_gen.generate_rsa_exploit(ctx)
+        default_name = self._exploit_gen.default_output_path(ctx)
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save RSA Attack Script",
+            default_name,
+            "Python scripts (*.py);;All files (*)",
+        )
+        if not save_path:
+            return
+
+        try:
+            with open(save_path, "w") as fh:
+                fh.write(script)
+            QMessageBox.information(
+                self,
+                "RSA Script Generated",
+                f"RSA attack script saved to:\n{save_path}\n\n"
+                "Set N, e, c (and p/q or e2/c2 as appropriate) then run:\n"
+                f"  python3 {save_path}",
             )
         except OSError as exc:
             QMessageBox.critical(self, "Save Failed", str(exc))

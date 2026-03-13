@@ -81,6 +81,21 @@ def _conf(n_hits: int, *, weak: float = 0.35, strong: float = 0.80) -> float:
     return weak
 
 
+def _strip_markdown_fences(text: str) -> str:
+    """Remove markdown code fences (``` … ```) that models sometimes emit.
+
+    Despite the system prompt saying "no markdown", models occasionally wrap
+    their JSON response in triple-backtick fences.  Stripping them before
+    json.loads() is a practical defence.
+    """
+    text = text.strip()
+    # Remove opening fence line: ```json or just ```
+    text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+    # Remove closing fence
+    text = re.sub(r"\n?```\s*$", "", text)
+    return text.strip()
+
+
 # ---------------------------------------------------------------------------
 # 30 attack-pattern rule functions
 # ---------------------------------------------------------------------------
@@ -939,9 +954,13 @@ class HypothesisEngine:
             logger.warning("AI hypothesis call failed: %s", exc)
             return []
 
-        # Strict JSON parse — discard silently if invalid
+        # Strip markdown code fences that models sometimes emit despite instructions.
+        # e.g. ```json\n{...}\n``` or ```\n{...}\n```
+        clean = _strip_markdown_fences(response)
+
+        # Strict JSON parse — discard silently if still invalid after stripping
         try:
-            data = json.loads(response)
+            data = json.loads(clean)
         except (json.JSONDecodeError, TypeError):
             logger.warning(
                 "AI response was not valid JSON — discarding. Response preview: %.200s",
