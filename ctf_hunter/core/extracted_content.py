@@ -82,7 +82,7 @@ def extract_from_finding(finding) -> list[ExtractedContent]:
         # characters instead of the decoded payload.
         if len(data) > 2:
             declared_length = int.from_bytes(data[:2], "big")
-            if declared_length == len(data) - 2:
+            if declared_length > 0 and declared_length == len(data) - 2:
                 data = data[2:]
                 encoding_chain.append("length_prefix_stripped")
 
