@@ -71,6 +71,21 @@ def extract_from_finding(finding) -> list[ExtractedContent]:
         if not data:
             continue
 
+        encoding_chain = ["raw_hex"]
+
+        # Strip a 2-byte big-endian length prefix when its value exactly equals
+        # the number of remaining bytes.  This handles payloads produced by
+        # tools (e.g. steghide-style LSB encoders) that prepend a uint16 BE
+        # length field to the actual content.  Without stripping, the extra
+        # bytes corrupt the base64 alphabet ratio check in the classifier,
+        # causing the downstream XOR brute-forcer to operate on the raw base64
+        # characters instead of the decoded payload.
+        if len(data) > 2:
+            declared_length = int.from_bytes(data[:2], "big")
+            if declared_length > 0 and declared_length == len(data) - 2:
+                data = data[2:]
+                encoding_chain.append("length_prefix_stripped")
+
         content_hash = hashlib.sha256(data).hexdigest()
         label = f"raw_hex extract from finding '{getattr(finding, 'title', '')}'"
 
@@ -80,7 +95,7 @@ def extract_from_finding(finding) -> list[ExtractedContent]:
                 label=label,
                 source_finding_id=finding_id,
                 source_analyzer=analyzer,
-                encoding_chain=["raw_hex"],
+                encoding_chain=encoding_chain,
                 content_hash=content_hash,
                 depth=0,
             )
