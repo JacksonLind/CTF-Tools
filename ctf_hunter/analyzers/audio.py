@@ -21,6 +21,8 @@ class AudioAnalyzer(Analyzer):
         flag_pattern: re.Pattern,
         depth: str,
         ai_client: Optional[AIClient],
+        session=None,
+        dispatcher_module=None,
     ) -> List[Finding]:
         findings: List[Finding] = []
 
@@ -34,6 +36,7 @@ class AudioAnalyzer(Analyzer):
             # LSB in WAV PCM
             findings.extend(self._check_wav_lsb(path, flag_pattern))
 
+        self._run_redispatch_hook(findings, session, dispatcher_module)
         return findings
 
     # ------------------------------------------------------------------

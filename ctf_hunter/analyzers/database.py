@@ -22,6 +22,8 @@ class DatabaseAnalyzer(Analyzer):
         flag_pattern: re.Pattern,
         depth: str,
         ai_client: Optional[AIClient],
+        session=None,
+        dispatcher_module=None,
     ) -> List[Finding]:
         findings: List[Finding] = []
         try:
@@ -93,4 +95,5 @@ class DatabaseAnalyzer(Analyzer):
         finally:
             conn.close()
 
+        self._run_redispatch_hook(findings, session, dispatcher_module)
         return findings

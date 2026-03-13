@@ -195,6 +195,8 @@ class SteganalysisAnalyzer(Analyzer):
         flag_pattern: re.Pattern,
         depth: str,
         ai_client: Optional[AIClient],
+        session=None,
+        dispatcher_module=None,
     ) -> List[Finding]:
         findings: List[Finding] = []
         ext = Path(path).suffix.lower()
@@ -251,6 +253,7 @@ class SteganalysisAnalyzer(Analyzer):
                     severity="INFO", confidence=0.50,
                 ))
 
+        self._run_redispatch_hook(findings, session, dispatcher_module)
         return findings
 
     # ===================================================================

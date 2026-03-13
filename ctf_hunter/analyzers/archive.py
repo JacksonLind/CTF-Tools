@@ -23,11 +23,14 @@ class ArchiveAnalyzer(Analyzer):
         flag_pattern: re.Pattern,
         depth: str,
         ai_client: Optional[AIClient],
+        session=None,
+        dispatcher_module=None,
     ) -> List[Finding]:
         findings: List[Finding] = []
 
         if not self._is_zip(path):
             findings.extend(self._check_generic_archive(path, flag_pattern))
+            self._run_redispatch_hook(findings, session, dispatcher_module)
             return findings
 
         try:
@@ -49,6 +52,7 @@ class ArchiveAnalyzer(Analyzer):
                 severity="INFO",
                 confidence=0.2,
             ))
+        self._run_redispatch_hook(findings, session, dispatcher_module)
         return findings
 
     # ------------------------------------------------------------------

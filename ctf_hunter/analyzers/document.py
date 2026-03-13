@@ -20,6 +20,8 @@ class DocumentAnalyzer(Analyzer):
         flag_pattern: re.Pattern,
         depth: str,
         ai_client: Optional[AIClient],
+        session=None,
+        dispatcher_module=None,
     ) -> List[Finding]:
         findings: List[Finding] = []
         try:
@@ -36,6 +38,7 @@ class DocumentAnalyzer(Analyzer):
             # OLE binary (DOC, XLS, PPT)
             findings.extend(self._analyze_ole(path, flag_pattern))
 
+        self._run_redispatch_hook(findings, session, dispatcher_module)
         return findings
 
     # ------------------------------------------------------------------

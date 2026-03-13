@@ -301,13 +301,18 @@ def analyze_file(
     depth: str = getattr(session, "depth", "fast") or "fast"  # guard against empty string
 
     all_findings: List[Finding] = []
+    import sys as _sys
+    _dispatcher_module = _sys.modules[__name__]
     for key in analyzers:
         cls = _ANALYZER_REGISTRY.get(key)
         if cls is None:
             continue
         try:
             a = cls()
-            new_findings = a.analyze(path, flag_pattern, depth, ai_client)
+            new_findings = a.analyze(
+                path, flag_pattern, depth, ai_client,
+                session=session, dispatcher_module=_dispatcher_module,
+            )
             if virtual_name:
                 for f in new_findings:
                     f.file = virtual_name
