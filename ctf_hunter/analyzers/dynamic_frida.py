@@ -188,8 +188,10 @@ class FridaAnalyzer(Analyzer):
         messages: list[dict] = []
         pid: Optional[int] = None
         killed = threading.Event()
+        _cap_logged = False  # emit the cap-exceeded warning at most once
 
         def _on_message(message, data):
+            nonlocal _cap_logged
             if message.get("type") == "send":
                 if len(messages) >= _MAX_FRIDA_MESSAGES:
                     # Cap reached — stop accepting to prevent memory exhaustion.
@@ -198,6 +200,15 @@ class FridaAnalyzer(Analyzer):
                     # unloading the script is not safe.  The hard wall-clock
                     # timer will kill the process within _WALL_CLOCK_TIMEOUT
                     # seconds regardless.
+                    if not _cap_logged:
+                        import warnings
+                        warnings.warn(
+                            f"FridaAnalyzer: message cap ({_MAX_FRIDA_MESSAGES}) reached "
+                            "for {path!r}; further messages will be discarded.",
+                            RuntimeWarning,
+                            stacklevel=0,
+                        )
+                        _cap_logged = True
                     return
                 payload = message.get("payload")
                 if isinstance(payload, dict):

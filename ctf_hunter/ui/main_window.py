@@ -131,6 +131,9 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_central()
         self._build_transform_pipeline_dock()
+        self._build_session_diff_dock()
+        self._build_frida_results_dock()
+        self._build_menu_bar()
 
         # Update tool dots
         self._update_tool_status()
@@ -670,14 +673,11 @@ class MainWindow(QMainWindow):
             label_b=Path(path).name,
             parent=self,
         )
-        dock = QDockWidget("🔀 Session Diff", self)
-        dock.setAllowedAreas(
-            Qt.DockWidgetArea.BottomDockWidgetArea | Qt.DockWidgetArea.TopDockWidgetArea
-        )
-        dock.setWidget(panel)
-        dock.setMinimumHeight(300)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
-        dock.show()
+        # Reuse the persistent diff dock so its View-menu toggle remains valid
+        # across multiple comparisons.
+        self._diff_dock.setWidget(panel)
+        self._diff_dock.show()
+        self._diff_dock.raise_()
 
     # ------------------------------------------------------------------
     # Dynamic Frida analysis
@@ -743,9 +743,29 @@ class MainWindow(QMainWindow):
 
         worker = _FridaWorker(path, flag_re, self._ai_client, frida_args,
                               self._frida_timeout_seconds)
-        worker.signals.finished.connect(self._on_analysis_done)
+        worker.signals.finished.connect(self._on_frida_analysis_done)
         worker.signals.error.connect(self._on_analysis_error)
         self._thread_pool.start(worker)
+
+    def _on_frida_analysis_done(self, path: str, findings: List[Finding]) -> None:
+        """Handle Frida analysis completion: update main result panel and show Frida dock."""
+        self._on_analysis_done(path, findings)
+        # Populate the dedicated Frida results dock with a human-readable summary
+        frida_findings = [f for f in findings if f.analyzer == "FridaAnalyzer"]
+        lines: List[str] = [f"Dynamic analysis results for:\n{path}\n"]
+        if frida_findings:
+            for f in frida_findings:
+                flag_icon = "🚩 " if f.flag_match else ""
+                lines.append(f"[{f.severity}] {flag_icon}{f.title}")
+                if f.detail:
+                    detail = f.detail[:300] + ("…" if len(f.detail) > 300 else "")
+                    lines.append(f"  {detail}")
+                lines.append("")
+        else:
+            lines.append("No findings from dynamic analysis.")
+        self._frida_results_text.setPlainText("\n".join(lines))
+        self._frida_dock.show()
+        self._frida_dock.raise_()
 
     # ------------------------------------------------------------------
     # Network tab
@@ -930,6 +950,95 @@ class MainWindow(QMainWindow):
         context = f"Transform chain applied: {transforms}\n\nFinal output:\n{final_output[:2000]}"
         self._challenge_panel.set_additional_context(context)
         self._tabs.setCurrentWidget(self._challenge_panel)
+
+    # ------------------------------------------------------------------
+    # Session Diff dock
+    # ------------------------------------------------------------------
+
+    def _build_session_diff_dock(self) -> None:
+        """Create the persistent Session Diff dock (initially hidden).
+
+        The dock is shown and its content replaced each time _compare_session()
+        runs.  Its toggleViewAction() is registered in the View menu so users
+        can re-show a diff that was accidentally closed without re-running the
+        comparison.
+        """
+        placeholder = QLabel("Use '🔀 Compare Session' to load a session diff.")
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder.setStyleSheet("color: #888; padding: 20px;")
+
+        self._diff_dock = QDockWidget("🔀 Session Diff", self)
+        self._diff_dock.setAllowedAreas(
+            Qt.DockWidgetArea.BottomDockWidgetArea | Qt.DockWidgetArea.TopDockWidgetArea
+        )
+        self._diff_dock.setWidget(placeholder)
+        self._diff_dock.setMinimumHeight(300)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._diff_dock)
+        self._diff_dock.hide()
+
+    # ------------------------------------------------------------------
+    # Frida results dock
+    # ------------------------------------------------------------------
+
+    def _build_frida_results_dock(self) -> None:
+        """Create the persistent Dynamic Analysis (Frida) results dock (initially hidden).
+
+        The dock is shown and populated each time a Frida analysis completes.
+        Its toggleViewAction() is registered in the View menu so users can
+        re-open the panel after closing it.
+        """
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(4, 4, 4, 4)
+
+        hdr = QLabel("🔬 Dynamic Analysis (Frida) Results")
+        hdr.setStyleSheet("font-weight: bold; padding: 4px;")
+        layout.addWidget(hdr)
+
+        self._frida_results_text = QTextEdit()
+        self._frida_results_text.setReadOnly(True)
+        self._frida_results_text.setPlaceholderText(
+            "Run '🔬 Run Dynamic Analysis (Frida)' on a binary to see results here."
+        )
+        layout.addWidget(self._frida_results_text)
+
+        self._frida_dock = QDockWidget("🔬 Dynamic Analysis Results", self)
+        self._frida_dock.setAllowedAreas(
+            Qt.DockWidgetArea.BottomDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self._frida_dock.setWidget(container)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._frida_dock)
+        self._frida_dock.hide()
+
+    # ------------------------------------------------------------------
+    # View menu (menu bar)
+    # ------------------------------------------------------------------
+
+    def _build_menu_bar(self) -> None:
+        """Build the application menu bar with a View menu for dock panel toggles.
+
+        All three dockable panels are registered here so users can toggle them
+        from a single, discoverable location even if they have been closed.
+        """
+        mb = self.menuBar()
+        view_menu = mb.addMenu("View")
+
+        # Session Diff panel — uses the dock's own toggleViewAction() so Qt
+        # keeps the checked state in sync with actual dock visibility automatically.
+        diff_action = self._diff_dock.toggleViewAction()
+        diff_action.setText("Session Diff Panel")
+        view_menu.addAction(diff_action)
+
+        # Dynamic Analysis (Frida) results panel
+        frida_action = self._frida_dock.toggleViewAction()
+        frida_action.setText("Dynamic Analysis Results")
+        view_menu.addAction(frida_action)
+
+        view_menu.addSeparator()
+
+        # Transform Pipeline — the same QAction already present in the toolbar,
+        # mirrored here so the View menu is the single place to find all panels.
+        view_menu.addAction(self._pipeline_toggle_action)
 
     # ------------------------------------------------------------------
     # Workspace correlator

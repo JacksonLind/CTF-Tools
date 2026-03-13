@@ -47,8 +47,10 @@ class _Handler(FileSystemEventHandler):
             timer = threading.Timer(_DEBOUNCE_SECONDS, self._fire, args=(path,))
             timer.daemon = True
             timer.start()
-            # Only add to the dict after start() succeeds so a start() exception
-            # does not leave an unstarted timer in the tracking dict.
+            # Only add to the dict after start() succeeds so that cancel_all()
+            # only ever sees actually-running timers.  A start() exception must
+            # not leave a dead timer entry that would prevent a future
+            # _schedule() call from cancelling it.
             self._timers[path] = timer
 
     def _fire(self, path: str) -> None:
