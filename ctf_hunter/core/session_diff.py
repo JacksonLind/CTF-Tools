@@ -11,7 +11,19 @@ from core.report import Finding, Session
 
 
 def _stable_key(f: Finding) -> Tuple[str, str, str, int]:
-    """Return the stable identity key for a finding used during diff matching."""
+    """Return the stable identity key for a finding used during diff matching.
+
+    Key: (analyzer_name, severity, title, byte_offset).
+
+    Known limitation: if byte_offset shifts between sessions — e.g. after
+    patching a binary or when two analyzers produce the same logical finding at
+    slightly different offsets — the diff will report a spurious "removed" entry
+    from session A and a "new" entry from session B instead of a "modified" pair.
+    For most CTF workflows (re-running the same file) this is not a problem, but
+    users should be aware of this when comparing sessions from patched binaries.
+    Using offset=-1 for findings that are not tied to a specific byte range avoids
+    this issue for those findings.
+    """
     return (f.analyzer, f.severity, f.title, f.offset)
 
 

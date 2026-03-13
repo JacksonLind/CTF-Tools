@@ -46,6 +46,11 @@ _DANGEROUS_HOOKS = {
 
 _WALL_CLOCK_TIMEOUT = 30  # hard upper bound (seconds)
 
+# Maximum number of messages accepted from the Frida agent.  A pathological
+# binary that generates many rwx regions or hooks many calls on every tick can
+# otherwise exhaust host memory before the 30-second hard timeout fires.
+_MAX_FRIDA_MESSAGES = 500
+
 # Frida JavaScript agent injected into the target process
 _JS_AGENT = r"""
 (function () {
@@ -186,6 +191,14 @@ class FridaAnalyzer(Analyzer):
 
         def _on_message(message, data):
             if message.get("type") == "send":
+                if len(messages) >= _MAX_FRIDA_MESSAGES:
+                    # Cap reached — stop accepting to prevent memory exhaustion.
+                    # We do not call script.unload() here because Frida's
+                    # message callback is invoked from an internal thread where
+                    # unloading the script is not safe.  The hard wall-clock
+                    # timer will kill the process within _WALL_CLOCK_TIMEOUT
+                    # seconds regardless.
+                    return
                 payload = message.get("payload")
                 if isinstance(payload, dict):
                     if data is not None:

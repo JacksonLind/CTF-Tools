@@ -31,6 +31,13 @@ class _Handler(FileSystemEventHandler):
         self._lock = threading.Lock()
         self.max_file_mb: float = _DEFAULT_MAX_FILE_MB
 
+    def cancel_all(self) -> None:
+        """Cancel every pending debounce timer.  Call this before shutting down."""
+        with self._lock:
+            for timer in self._timers.values():
+                timer.cancel()
+            self._timers.clear()
+
     def _schedule(self, path: str) -> None:
         with self._lock:
             # Cancel existing timer for this path if any
@@ -38,9 +45,11 @@ class _Handler(FileSystemEventHandler):
             if existing is not None:
                 existing.cancel()
             timer = threading.Timer(_DEBOUNCE_SECONDS, self._fire, args=(path,))
-            self._timers[path] = timer
             timer.daemon = True
             timer.start()
+            # Only add to the dict after start() succeeds so a start() exception
+            # does not leave an unstarted timer in the tracking dict.
+            self._timers[path] = timer
 
     def _fire(self, path: str) -> None:
         with self._lock:
@@ -111,6 +120,11 @@ class WatchfolderManager(QObject):
         self._observer.start()
 
     def stop(self) -> None:
+        # Cancel pending debounce timers before stopping the observer so no
+        # timer can fire after the watcher has shut down and attempt to emit
+        # signals on a destroyed object.
+        if self._handler is not None:
+            self._handler.cancel_all()
         if self._observer and self._observer.is_alive():
             self._observer.stop()
             self._observer.join()

@@ -283,12 +283,16 @@ class ResultPanel(QWidget):
                 if tri_bg:
                     item.setBackground(col, QColor(tri_bg))
                 else:
-                    item.setBackground(col, QColor(Qt.GlobalColor.transparent))
+                    item.setBackground(col, QColor())
                 if tri_fg:
                     item.setForeground(col, QColor(tri_fg))
             title_font = QFont()
-            title_font.setBold(tri_bold)
-            title_font.setStrikeOut(tri_strike)
+            # Preserve flag_match bold when re-styling after a triage change
+            finding = item.data(0, Qt.ItemDataRole.UserRole)
+            if tri_bold or (finding and finding.flag_match):
+                title_font.setBold(True)
+            if tri_strike:
+                title_font.setStrikeOut(True)
             item.setFont(2, title_font)
         self._update_triage_summary()
         self.triage_changed.emit(f)
