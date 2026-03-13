@@ -548,9 +548,12 @@ _RULES: List[_Rule] = [
         commands=[
             "python3 RsaCtfTool.py --attack commonmodulus",
             "python3 -c \""
+            "# Extended Euclidean: find s1,s2 such that s1*e1 + s2*e2 = 1, then m = pow(c1,s1,n)*pow(c2,s2,n)%n; "
             "from math import gcd; "
-            "g,_,_ = (lambda a,b: (abs(a),0,1) if b==0 else None)(e1,e2); "  # placeholder
-            "# Use extended Euclidean: m = c1^s1 * c2^s2 mod n\"",
+            "def egcd(a,b): return (a,1,0) if b==0 else (lambda g,x,y:(g,y,x-a//b*y))(*egcd(b,a%b)); "
+            "g,s1,s2=egcd(e1,e2); "
+            "m=(pow(c1,s1,n)*pow(c2,s2,n))%n; "
+            "print(m.to_bytes(256,'big').lstrip(b'\\\\x00'))\"",
         ],
         transforms=[],
     ),

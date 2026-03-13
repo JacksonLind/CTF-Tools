@@ -15,11 +15,10 @@ confidence ≥ ExploitGenerator.MIN_CONFIDENCE.
 from __future__ import annotations
 
 import os
-import shlex
 from typing import List, Optional
 
 from PyQt6.QtCore import Qt, QProcess, QSize, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QTextCursor
+from PyQt6.QtGui import QFont, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
