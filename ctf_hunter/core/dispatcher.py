@@ -3,6 +3,7 @@ Magic-byte dispatcher: identifies file types and routes to all applicable analyz
 """
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import List, Optional
@@ -118,6 +119,7 @@ _RSA_PAIR_RE = re.compile(
 )
 
 _CONFIDENCE_SCORER = ConfidenceScorer()
+_log = logging.getLogger(__name__)
 
 
 def dispatch(
@@ -140,6 +142,9 @@ def dispatch(
         return _dispatch_auto(path, flag_pattern, ai_client)
 
     findings = _run_dispatch(path, flag_pattern, depth, ai_client)
+    extra = _run_redispatch_fallback(findings, flag_pattern, depth)
+    if extra:
+        findings = deduplicate(findings + extra)
     _score_findings(findings, flag_pattern, depth)
     return findings
 
@@ -157,6 +162,10 @@ def _dispatch_auto(
     # Identify high-confidence findings and the analyzers responsible
     high_conf = [f for f in fast_findings if f.confidence >= 0.6 and f.duplicate_of is None]
     if not high_conf:
+        extra = _run_redispatch_fallback(fast_findings, flag_pattern, "fast")
+        if extra:
+            fast_findings = deduplicate(fast_findings + extra)
+            _score_findings(fast_findings, flag_pattern, "fast")
         return fast_findings
 
     responsible_analyzers: set[str] = {f.analyzer for f in high_conf}
@@ -188,6 +197,9 @@ def _dispatch_auto(
             merged.append(f)
 
     deduped = deduplicate(merged)
+    extra = _run_redispatch_fallback(deduped, flag_pattern, "deep")
+    if extra:
+        deduped = deduplicate(list(deduped) + extra)
     _score_findings(deduped, flag_pattern, "deep")
     return deduped
 
@@ -262,6 +274,139 @@ def _read_header(path: str) -> bytes:
             return fh.read(512)
     except Exception:
         return b""
+
+
+def _run_redispatch_fallback(
+    findings: List[Finding],
+    flag_pattern: re.Pattern,
+    depth: str,
+) -> List[Finding]:
+    """Run ContentRedispatcher on every root finding to catch missed extracted content.
+
+    A *root* finding is one whose ``source_finding_id`` is ``None`` — pipeline-
+    generated findings already have a source and must not be re-processed.
+
+    Logs statistics at INFO level: total content objects found, processed,
+    skipped (dedup), and timed out.
+
+    Returns:
+        List of additional findings produced by the ContentRedispatcher.
+    """
+    import sys
+    from .content_redispatcher import ContentRedispatcher
+    from .extracted_content import extract_from_finding
+
+    dispatcher_module = sys.modules[__name__]
+    rd = ContentRedispatcher()
+
+    # Temporary session: only used for seen-hash dedup and depth tracking
+    tmp_session = Session(findings=[])
+    tmp_session._seen_content_hashes = set()
+    try:
+        tmp_session.flag_pattern = flag_pattern.pattern
+    except Exception:
+        pass
+    tmp_session.depth = depth
+
+    total_found = 0
+    total_processed = 0
+    total_skipped = 0
+    total_timed_out = 0
+    extra: List[Finding] = []
+
+    for finding in findings:
+        if getattr(finding, "source_finding_id", None) is not None:
+            continue  # pipeline-generated — already processed, skip
+
+        contents = extract_from_finding(finding)
+        total_found += len(contents)
+
+        for content in contents:
+            if content.content_hash in tmp_session._seen_content_hashes:
+                total_skipped += 1
+                continue
+
+            child_findings = rd.process(content, tmp_session, dispatcher_module)
+            total_processed += 1
+
+            for f in child_findings:
+                if "Recursion timeout" in getattr(f, "title", ""):
+                    total_timed_out += 1
+
+            extra.extend(child_findings)
+
+    _log.info(
+        "ContentRedispatcher fallback: found=%d processed=%d skipped=%d timed_out=%d",
+        total_found, total_processed, total_skipped, total_timed_out,
+    )
+
+    return extra
+
+
+def analyze_file(
+    path: str,
+    session: "Session",
+    analyzers: Optional[List[str]] = None,
+    virtual_name: str = "",
+    ai_client: Optional[AIClient] = None,
+) -> List[Finding]:
+    """Run a specific subset of analyzers on *path* and return deduplicated findings.
+
+    This entry-point is used by :class:`~ctf_hunter.core.content_redispatcher.ContentRedispatcher`
+    to re-dispatch extracted content blobs through the existing analyzer suite as
+    if they were freshly-dropped files.
+
+    Args:
+        path: Filesystem path to the (possibly temporary) file to analyze.
+        session: Active analysis session; provides ``flag_pattern`` and ``depth``.
+        analyzers: Analyzer registry keys to run.  Pass ``None`` or ``[]`` to run
+            nothing (returns an empty list).
+        virtual_name: Human-readable name shown in findings instead of *path*.
+        ai_client: Optional AI client forwarded to each analyzer.
+
+    Returns:
+        Deduplicated list of :class:`~ctf_hunter.core.report.Finding` objects.
+    """
+    if not analyzers:
+        return []
+
+    try:
+        flag_pattern: re.Pattern = re.compile(
+            getattr(session, "flag_pattern", r"CTF\{[^}]+\}")
+        )
+    except re.error:
+        flag_pattern = re.compile(r"CTF\{[^}]+\}")
+
+    depth: str = getattr(session, "depth", "fast") or "fast"  # guard against empty string
+
+    all_findings: List[Finding] = []
+    import sys as _sys
+    _dispatcher_module = _sys.modules[__name__]
+    for key in analyzers:
+        cls = _ANALYZER_REGISTRY.get(key)
+        if cls is None:
+            continue
+        try:
+            a = cls()
+            new_findings = a.analyze(
+                path, flag_pattern, depth, ai_client,
+                session=session, dispatcher_module=_dispatcher_module,
+            )
+            if virtual_name:
+                for f in new_findings:
+                    f.file = virtual_name
+            all_findings.extend(new_findings)
+        except Exception as exc:
+            all_findings.append(Finding(
+                file=virtual_name or path,
+                analyzer=key,
+                title=f"Analyzer error in {key}",
+                severity="INFO",
+                detail=str(exc),
+                confidence=0.1,
+            ))
+
+    return deduplicate(all_findings)
 
 
 def _identify_analyzers(path: str, data: bytes) -> list[str]:

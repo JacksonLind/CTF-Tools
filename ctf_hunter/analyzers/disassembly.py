@@ -890,6 +890,7 @@ class DisassemblyAnalyzer(Analyzer):
         flag_pattern: re.Pattern,
         depth: str,
         ai_client: Optional[AIClient],
+        **_kw,
     ) -> List[Finding]:
         findings: List[Finding] = []
 

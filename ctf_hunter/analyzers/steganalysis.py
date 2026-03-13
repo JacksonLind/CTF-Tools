@@ -195,6 +195,8 @@ class SteganalysisAnalyzer(Analyzer):
         flag_pattern: re.Pattern,
         depth: str,
         ai_client: Optional[AIClient],
+        session=None,
+        dispatcher_module=None,
     ) -> List[Finding]:
         findings: List[Finding] = []
         ext = Path(path).suffix.lower()
@@ -251,6 +253,7 @@ class SteganalysisAnalyzer(Analyzer):
                     severity="INFO", confidence=0.50,
                 ))
 
+        self._run_redispatch_hook(findings, session, dispatcher_module)
         return findings
 
     # ===================================================================
@@ -477,26 +480,34 @@ class SteganalysisAnalyzer(Analyzer):
         triples = [(palette[i], palette[i+1], palette[i+2]) for i in range(0, min(len(palette), 768), 3)]
         anomalies: List[str] = []
         seen_colors: dict = {}
+        anomalous_indices: set = set()
 
         for idx, color in enumerate(triples):
             if usage.get(idx, 0) == 0:
                 anomalies.append(f"Unused palette[{idx}]={color}")
+                anomalous_indices.add(idx)
             if color in seen_colors:
                 anomalies.append(f"Duplicate palette[{idx}]=palette[{seen_colors[color]}]={color}")
+                anomalous_indices.add(idx)
             else:
                 seen_colors[color] = idx
             for byte_val in color:
                 if 0x20 <= byte_val <= 0x7E:
                     anomalies.append(f"palette[{idx}] printable 0x{byte_val:02x}=chr({byte_val})")
+                    anomalous_indices.add(idx)
                     break
 
         if anomalies:
             raw = bytes(palette[:768])
+            anomaly_bytes = bytearray()
+            for i in sorted(anomalous_indices):
+                r, g, b = triples[i]
+                anomaly_bytes.extend([r, g, b])
             flag_match, confidence, detail = decode_pipeline(raw, flag_pattern)
             findings.append(self._finding(
                 path,
                 f"Palette anomalies: {len(anomalies)} suspicious entries",
-                detail + " | " + "; ".join(anomalies[:10]),
+                detail + " | " + "; ".join(anomalies[:10]) + f"\nraw_hex={anomaly_bytes.hex()}",
                 severity="HIGH" if flag_match else "MEDIUM", offset=0,
                 flag_match=flag_match,
                 confidence=confidence if flag_match else _STAT_CONF,

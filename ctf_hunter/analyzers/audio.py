@@ -21,6 +21,8 @@ class AudioAnalyzer(Analyzer):
         flag_pattern: re.Pattern,
         depth: str,
         ai_client: Optional[AIClient],
+        session=None,
+        dispatcher_module=None,
     ) -> List[Finding]:
         findings: List[Finding] = []
 
@@ -34,6 +36,7 @@ class AudioAnalyzer(Analyzer):
             # LSB in WAV PCM
             findings.extend(self._check_wav_lsb(path, flag_pattern))
 
+        self._run_redispatch_hook(findings, session, dispatcher_module)
         return findings
 
     # ------------------------------------------------------------------
@@ -158,10 +161,11 @@ class AudioAnalyzer(Analyzer):
         if len(printable) > 20:
             text = printable.decode("ascii", errors="replace")[:500]
             fm = self._check_flag(text, flag_pattern)
+            hex_str = lsb_bytes.hex()
             return [self._finding(
                 path,
                 "LSB data extracted from WAV samples",
-                f"Extracted {len(printable)} printable bytes: {text[:200]}",
+                f"Extracted {len(printable)} printable bytes: {text[:200]}\nraw_hex={hex_str}",
                 severity="HIGH" if fm else "MEDIUM",
                 flag_match=fm,
                 confidence=0.75 if fm else 0.55,

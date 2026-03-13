@@ -43,6 +43,7 @@ class GenericAnalyzer(Analyzer):
         flag_pattern: re.Pattern,
         depth: str,
         ai_client: Optional[AIClient],
+        **_kw,
     ) -> List[Finding]:
         findings: List[Finding] = []
         try:
@@ -61,6 +62,9 @@ class GenericAnalyzer(Analyzer):
 
         # --- String extraction + flag pattern ---
         findings.extend(self._check_strings(path, data, flag_pattern, depth))
+
+        # --- Zero-width character steganography ---
+        findings.extend(self._check_zero_width_steg(path, data, flag_pattern))
 
         return findings
 
@@ -161,4 +165,86 @@ class GenericAnalyzer(Analyzer):
                     flag_match=True,
                     confidence=0.95,
                 ))
+        return findings
+
+    def _check_zero_width_steg(
+        self,
+        path: str,
+        data: bytes,
+        flag_pattern: re.Pattern,
+    ) -> List[Finding]:
+        """Detect zero-width character steganography using \\u200b, \\u200c, \\u200d.
+
+        Collects all occurrences of ZERO WIDTH SPACE (\\u200b), ZERO WIDTH
+        NON-JOINER (\\u200c), and ZERO WIDTH JOINER (\\u200d) in order, maps
+        each to a bit under two common schemes, converts to bytes, and stores
+        the result as ``raw_hex=`` in the finding detail.
+        """
+        # Only attempt on UTF-8 decodable content
+        try:
+            text = data.decode("utf-8", errors="strict")
+        except (UnicodeDecodeError, ValueError):
+            return []
+
+        _ZW_CHARS = ("\u200b", "\u200c", "\u200d")
+        positions = [(i, ch) for i, ch in enumerate(text) if ch in _ZW_CHARS]
+        if len(positions) < 8:
+            return []
+
+        findings: List[Finding] = []
+
+        # Scheme 1: ZWSP (\u200b) = 0; ZWNJ (\u200c) or ZWJ (\u200d) = 1
+        bits1 = [0 if ch == "\u200b" else 1 for _, ch in positions]
+
+        # Scheme 2: ZWSP (\u200b) or ZWNJ (\u200c) = 0; ZWJ (\u200d) = 1
+        bits2 = [1 if ch == "\u200d" else 0 for _, ch in positions]
+
+        for scheme, bits in (
+            ("zwsp=0/zwnj-zwj=1", bits1),
+            ("zwsp-zwnj=0/zwj=1", bits2),
+        ):
+            if len(bits) < 8:
+                continue
+
+            # Convert bits to bytes (MSB first)
+            raw = bytearray()
+            for i in range(0, len(bits) - 7, 8):
+                byte_val = 0
+                for j in range(8):
+                    byte_val |= (bits[i + j] & 1) << (7 - j)
+                raw.append(byte_val)
+            raw_bytes = bytes(raw)
+            if not raw_bytes:
+                continue
+
+            raw_hex = raw_bytes.hex()
+
+            # Check flag pattern against decoded text
+            try:
+                decoded_text = raw_bytes.decode("utf-8", errors="replace")
+            except Exception:
+                decoded_text = raw_bytes.decode("latin-1", errors="replace")
+            flag_hit = self._check_flag(decoded_text, flag_pattern)
+
+            printable_ratio = sum(
+                1 for b in raw_bytes if 0x20 <= b <= 0x7E or b in (9, 10, 13)
+            ) / len(raw_bytes)
+            is_printable = printable_ratio >= 0.80
+
+            if not flag_hit and not is_printable:
+                continue
+
+            findings.append(self._finding(
+                path,
+                f"Zero-width char stego ({len(positions)} ZW chars, scheme={scheme})",
+                (
+                    f"raw_hex={raw_hex}"
+                    f" | positions={[p for p, _ in positions[:10]]}"
+                ),
+                severity="HIGH" if flag_hit else "MEDIUM",
+                offset=positions[0][0],
+                flag_match=flag_hit,
+                confidence=0.95 if flag_hit else 0.70,
+            ))
+
         return findings

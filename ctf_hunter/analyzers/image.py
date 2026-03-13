@@ -21,6 +21,7 @@ class ImageAnalyzer(Analyzer):
         flag_pattern: re.Pattern,
         depth: str,
         ai_client: Optional[AIClient],
+        **_kw,
     ) -> List[Finding]:
         findings: List[Finding] = []
 
@@ -149,10 +150,11 @@ class ImageAnalyzer(Analyzer):
                        for i in range(0, len(palette), 3)]
             unique = len(set(triples))
             if unique > 200 or unique < 2:
+                palette_hex = bytes(palette).hex()
                 return [self._finding(
                     path,
                     f"Abnormal palette size: {unique} unique colors",
-                    "Palette images with unusual color counts may hide data in palette entries.",
+                    f"Palette images with unusual color counts may hide data in palette entries.\nraw_hex={palette_hex}",
                     severity="MEDIUM",
                     confidence=0.55,
                 )]

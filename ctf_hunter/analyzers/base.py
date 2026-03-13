@@ -53,3 +53,29 @@ class Analyzer(ABC):
             return bool(pattern.search(text))
         except Exception:
             return False
+
+    def _run_redispatch_hook(
+        self,
+        findings: List[Finding],
+        session,
+        dispatcher_module,
+    ) -> None:
+        """For each finding, extract content blobs and pass to ContentRedispatcher.
+
+        Extracted content is re-dispatched through the full analyzer suite and
+        any resulting child findings are attached directly to ``session.findings``
+        with ``depth = parent_content.depth + 1``.  This method is a no-op when
+        either ``session`` or ``dispatcher_module`` is ``None``.
+        """
+        if session is None or dispatcher_module is None:
+            return
+        try:
+            from core.extracted_content import extract_from_finding
+            from core.content_redispatcher import ContentRedispatcher
+            rd = ContentRedispatcher()
+            for finding in list(findings):
+                for content in extract_from_finding(finding):
+                    child_findings = rd.process(content, session, dispatcher_module)
+                    session.findings.extend(child_findings)
+        except Exception:
+            pass

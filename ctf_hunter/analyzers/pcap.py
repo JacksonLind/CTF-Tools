@@ -27,6 +27,8 @@ class PcapAnalyzer(Analyzer):
         flag_pattern: re.Pattern,
         depth: str,
         ai_client: Optional[AIClient],
+        session=None,
+        dispatcher_module=None,
     ) -> List[Finding]:
         findings: List[Finding] = []
         try:
@@ -51,6 +53,7 @@ class PcapAnalyzer(Analyzer):
                     severity="INFO",
                     confidence=0.2,
                 ))
+            self._run_redispatch_hook(findings, session, dispatcher_module)
             return findings
 
         # Protocol summary
@@ -78,6 +81,7 @@ class PcapAnalyzer(Analyzer):
         # DNS covert channel detection (always run)
         findings.extend(self._detect_dns_covert_channel(path, packets, flag_pattern))
 
+        self._run_redispatch_hook(findings, session, dispatcher_module)
         return findings
 
     # ------------------------------------------------------------------

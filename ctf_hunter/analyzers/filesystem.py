@@ -22,6 +22,8 @@ class FilesystemAnalyzer(Analyzer):
         flag_pattern: re.Pattern,
         depth: str,
         ai_client: Optional[AIClient],
+        session=None,
+        dispatcher_module=None,
     ) -> List[Finding]:
         findings: List[Finding] = []
         try:
@@ -34,6 +36,7 @@ class FilesystemAnalyzer(Analyzer):
                 path, "Filesystem analysis error", str(exc),
                 severity="INFO", confidence=0.2,
             ))
+        self._run_redispatch_hook(findings, session, dispatcher_module)
         return findings
 
     # ------------------------------------------------------------------

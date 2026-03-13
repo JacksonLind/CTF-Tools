@@ -401,6 +401,7 @@ class EncodingAnalyzer(Analyzer):
         flag_pattern: re.Pattern,
         depth: str,
         ai_client: Optional[AIClient],
+        **_kw,
     ) -> List[Finding]:
         findings: List[Finding] = []
         strings = run_strings(path, min_len=8)
