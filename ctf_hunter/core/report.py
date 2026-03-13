@@ -31,6 +31,7 @@ class Finding:
     corroboration: List[str] = field(default_factory=list)  # IDs of supporting findings
     triage: str = "untriaged"       # untriaged | promising | investigating | dead_end | confirmed_flag
     triage_note: str = ""           # free-text annotation
+    source_finding_id: Optional[str] = None  # set on findings produced by ContentRedispatcher
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -41,6 +42,7 @@ class Finding:
         # Backward compatibility: default missing triage fields
         known.setdefault("triage", "untriaged")
         known.setdefault("triage_note", "")
+        known.setdefault("source_finding_id", None)
         return cls(**known)
 
 

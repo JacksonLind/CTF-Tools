@@ -488,6 +488,7 @@ class ContentRedispatcher:
 
             # Tag each finding with the originating source finding ID
             for f in findings:
+                f.source_finding_id = content.source_finding_id
                 tag = f"Source finding: {content.source_finding_id}"
                 f.detail = f"{f.detail}\n{tag}" if f.detail else tag
 
