@@ -9,6 +9,9 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Optional
 
+# Valid triage states
+TRIAGE_STATES = ("untriaged", "promising", "investigating", "dead_end", "confirmed_flag")
+
 
 @dataclass
 class Finding:
@@ -26,13 +29,19 @@ class Finding:
     duplicate_of: Optional[str] = None
     corroboration_count: int = 1
     corroboration: List[str] = field(default_factory=list)  # IDs of supporting findings
+    triage: str = "untriaged"       # untriaged | promising | investigating | dead_end | confirmed_flag
+    triage_note: str = ""           # free-text annotation
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict) -> "Finding":
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        # Backward compatibility: default missing triage fields
+        known.setdefault("triage", "untriaged")
+        known.setdefault("triage_note", "")
+        return cls(**known)
 
 
 @dataclass

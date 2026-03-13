@@ -2,6 +2,14 @@
 """
 Build script: packages CTF Hunter into a single executable using PyInstaller.
 Run: python build.py
+
+Optional Frida support
+----------------------
+If frida is installed (pip install frida frida-tools), the dynamic analysis
+analyzer (analyzers/dynamic_frida.py) will be active at runtime.  The
+PyInstaller bundle does not embed frida automatically; users who want dynamic
+analysis should install frida in the Python environment that runs CTF Hunter
+rather than relying on the bundled executable.
 """
 from __future__ import annotations
 
@@ -14,9 +22,29 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 
 
+def _ensure_frida_downloaded() -> None:
+    """Attempt to pip-install frida if available in the current environment."""
+    try:
+        import frida  # noqa: F401 — already installed
+        return
+    except ImportError:
+        pass
+    print("Optional: attempting to install frida for dynamic analysis support…")
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet", "frida", "frida-tools"],
+            check=False,
+        )
+    except Exception as exc:
+        print(f"  frida install skipped: {exc}")
+
+
 def main() -> None:
     dist_path = ROOT / "dist"
     build_path = ROOT / "build_pyinstaller"
+
+    # Try to make frida available in the build environment (best-effort)
+    _ensure_frida_downloaded()
 
     args = [
         sys.executable, "-m", "PyInstaller",

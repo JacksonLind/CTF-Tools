@@ -9,7 +9,8 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QFileDialog, QDialogButtonBox,
+    QLineEdit, QPushButton, QFileDialog, QDialogButtonBox, QDoubleSpinBox,
+    QSpinBox,
 )
 from PyQt6.QtCore import Qt
 
@@ -38,7 +39,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setModal(True)
-        self.resize(500, 200)
+        self.resize(500, 280)
 
         self._config = load_config()
 
@@ -66,6 +67,34 @@ class SettingsDialog(QDialog):
         wl_row.addWidget(browse_btn)
         layout.addLayout(wl_row)
 
+        # --- Watch folder max file size ---
+        wf_row = QHBoxLayout()
+        wf_row.addWidget(QLabel("Watchfolder max file size (MB):"))
+        self._max_file_mb_spin = QDoubleSpinBox()
+        self._max_file_mb_spin.setRange(1.0, 10000.0)
+        self._max_file_mb_spin.setDecimals(0)
+        self._max_file_mb_spin.setSingleStep(10.0)
+        self._max_file_mb_spin.setValue(float(self._config.get("max_file_mb", 50)))
+        self._max_file_mb_spin.setToolTip(
+            "Files larger than this will be skipped by the watch folder (default: 50 MB)"
+        )
+        wf_row.addWidget(self._max_file_mb_spin)
+        wf_row.addStretch()
+        layout.addLayout(wf_row)
+
+        # --- Frida timeout ---
+        frida_row = QHBoxLayout()
+        frida_row.addWidget(QLabel("Frida analysis timeout (seconds):"))
+        self._frida_timeout_spin = QSpinBox()
+        self._frida_timeout_spin.setRange(1, 120)
+        self._frida_timeout_spin.setValue(int(self._config.get("frida_timeout_seconds", 10)))
+        self._frida_timeout_spin.setToolTip(
+            "How long to collect Frida messages before killing the process (default: 10 s)"
+        )
+        frida_row.addWidget(self._frida_timeout_spin)
+        frida_row.addStretch()
+        layout.addLayout(frida_row)
+
         # --- Dialog buttons ---
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -82,6 +111,8 @@ class SettingsDialog(QDialog):
     def _save_and_accept(self) -> None:
         self._config["api_key"] = self._api_key_edit.text().strip()
         self._config["wordlist_path"] = self._wordlist_edit.text().strip()
+        self._config["max_file_mb"] = self._max_file_mb_spin.value()
+        self._config["frida_timeout_seconds"] = self._frida_timeout_spin.value()
         save_config(self._config)
         self.accept()
 
@@ -90,3 +121,10 @@ class SettingsDialog(QDialog):
 
     def get_wordlist_path(self) -> str:
         return self._config.get("wordlist_path", "")
+
+    def get_max_file_mb(self) -> float:
+        return float(self._config.get("max_file_mb", 50))
+
+    def get_frida_timeout_seconds(self) -> int:
+        return int(self._config.get("frida_timeout_seconds", 10))
+
