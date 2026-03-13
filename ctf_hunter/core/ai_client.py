@@ -122,32 +122,46 @@ class AIClient:
         across all data simultaneously rather than commenting on each finding
         in isolation.
         """
+        # Truncate pseudocode fields proportionally *before* serialisation so
+        # that the JSON sent to the API is always syntactically valid.  A blind
+        # [:5000] on the already-serialised string risks cutting in the middle
+        # of a string literal or key, producing malformed JSON.
+        funcs = high_complexity_functions[:10]
+        if funcs:
+            # Distribute a 3 000-character budget evenly across all functions.
+            per_func_budget = max(100, 3000 // len(funcs))
+            funcs = [
+                {**f, "pseudocode": (f.get("pseudocode") or "")[:per_func_budget]}
+                for f in funcs
+            ]
+
         payload = {
             "file": file_path,
-            "high_complexity_functions": high_complexity_functions[:10],
+            "high_complexity_functions": funcs,
             "flagged_imports": flagged_imports,
             "crypto_constants": crypto_constants,
             "xref_strings": xref_strings[:30],
         }
-        payload_json = json.dumps(payload, indent=2)[:5000]
+        payload_json = json.dumps(payload, indent=2)
 
+        # System prompt instructs Claude to go straight to the attack plan
+        # without spending tokens re-describing the input format.
         system_prompt = (
             "You are an expert reverse-engineer and CTF competition analyst. "
-            "You will be given structured analysis data extracted from a binary "
-            "using radare2. Your job is to synthesise all of the data into an "
-            "actionable, prioritised attack plan for capturing the flag.\n\n"
-            "Guidelines:\n"
-            "1. If decompiled pseudocode is present, identify the most suspicious "
-            "   functions (loops over XOR/shift operations, comparisons to static "
-            "   buffers, recursion, string decryption patterns).\n"
-            "2. Cross-reference flagged imports with crypto constants — e.g. "
-            "   'system' + AES S-box suggests a shell is spawned after decryption.\n"
-            "3. Map xref strings to their callers to pinpoint where the flag "
-            "   comparison or decryption routine lives.\n"
-            "4. Call out any LD_PRELOAD / constructor hooks as high-priority.\n"
-            "5. Produce a numbered, prioritised attack plan: what to patch / hook / "
-            "   trace first and why.\n"
-            "Be concise and actionable. Avoid restating the input data verbatim."
+            "The user message contains structured JSON produced by radare2. "
+            "Do NOT describe or re-explain what the JSON contains — go straight "
+            "to the analysis. Your only output should be a numbered, prioritised "
+            "CTF attack plan.\n\n"
+            "When analysing the data:\n"
+            "1. Identify the most suspicious decompiled functions — look for loops "
+            "   with XOR/shift operations, comparisons against static buffers, "
+            "   string-decryption patterns, or recursion.\n"
+            "2. Cross-reference flagged imports with detected crypto constants — "
+            "   e.g. 'system' + AES S-box implies a shell is spawned post-decryption.\n"
+            "3. Use xref_strings to map interesting literals to their callers and "
+            "   pinpoint flag comparison or decryption routines.\n"
+            "4. Treat LD_PRELOAD hooks and constructor functions as highest priority.\n"
+            "5. Be concise and actionable. Do not restate the input."
         )
 
         if not self.available:

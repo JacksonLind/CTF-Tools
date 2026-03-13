@@ -845,6 +845,10 @@ def _r2_analyze(
         # Sends a rich structured context to Claude — high-complexity          #
         # function pseudocode, flagged imports, detected crypto primitives,    #
         # and xref-mapped strings — to produce an actionable CTF attack plan.  #
+        #                                                                      #
+        # The depth guard is enforced HERE inside _r2_analyze() rather than   #
+        # at the call site so that fast vs deep divergence over time cannot    #
+        # silently disable this step.                                          #
         # ------------------------------------------------------------------ #
         if depth == "deep" and ai_client and ai_client.available:
             analysis = ai_client.analyze_binary(
