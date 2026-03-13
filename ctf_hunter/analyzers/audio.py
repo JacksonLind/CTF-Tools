@@ -161,10 +161,11 @@ class AudioAnalyzer(Analyzer):
         if len(printable) > 20:
             text = printable.decode("ascii", errors="replace")[:500]
             fm = self._check_flag(text, flag_pattern)
+            hex_str = lsb_bytes.hex()
             return [self._finding(
                 path,
                 "LSB data extracted from WAV samples",
-                f"Extracted {len(printable)} printable bytes: {text[:200]}",
+                f"Extracted {len(printable)} printable bytes: {text[:200]}\nraw_hex={hex_str}",
                 severity="HIGH" if fm else "MEDIUM",
                 flag_match=fm,
                 confidence=0.75 if fm else 0.55,
