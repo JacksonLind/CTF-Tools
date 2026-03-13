@@ -4,15 +4,16 @@ Hypothesis Engine for CTF Hunter.
 After confidence scoring completes, this module runs regardless of whether AI is
 configured, providing rule-based hypotheses about the most likely attack path.
 
-Rule-based path (always runs):
-  - Maintains a decision tree of ~30 CTF attack patterns
-  - Matches current session findings against the tree
-  - Outputs an ordered list of Hypothesis objects
+Rule-based path (always runs, no API key required):
+  - Implements 30 CTF attack-pattern rules organised in _RULES list
+  - Each rule inspects session findings and returns a Hypothesis or None
+  - Confidence is proportional to how many corroborating signals are present
 
 AI-augmented path (runs additionally if API key configured):
   - Serializes top 15 findings by confidence score into compact JSON
-  - Sends to Claude with a CTF-solver system prompt
-  - Parses response into AI Hypothesis objects
+  - Sends to Claude with a strict CTF-solver system prompt
+  - Parses strict JSON response into AI Hypothesis objects
+  - Invalid / non-JSON responses are discarded silently (WARNING logged)
 """
 from __future__ import annotations
 
@@ -37,16 +38,17 @@ class Hypothesis:
 
     title: str
     confidence: float
-    category: str                       # e.g. "Steganography", "Crypto", "Binary"
-    required_findings: List[str]        # finding IDs already present
-    missing_findings: List[str]         # what to look for next (descriptions)
-    suggested_command: str              # concrete shell command or transform chain
-    reasoning: str                      # explanation
-    source: str = "rule"               # "rule" | "ai"
+    category: str                          # e.g. "pwn", "rev", "crypto", "steg", "forensics", "web"
+    present_findings: List[str]            # finding *titles* already in session that support this
+    missing_findings: List[str]            # what to look for next to confirm
+    suggested_commands: List[str]          # concrete shell commands or tool invocations
+    suggested_transforms: List[str]        # transform pipeline steps in order
+    source: str = "rules"                  # "rules" | "ai"
+    reasoning: str = ""                    # optional human-readable explanation (used by UI)
 
 
 # ---------------------------------------------------------------------------
-# Rule definitions
+# Rule helpers
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -54,333 +56,776 @@ class _Rule:
     """A single pattern rule in the decision tree."""
     title: str
     category: str
-    match_fn: object        # callable(findings) -> Optional[tuple(confidence, required_ids, reasoning)]
+    match_fn: object        # callable(findings) -> Optional[tuple(float, List[Finding])]
     missing: List[str]
-    command: str
+    commands: List[str]
+    transforms: List[str] = field(default_factory=list)
 
 
 def _matches_title(findings: List[Finding], keywords: List[str]) -> List[Finding]:
-    """Return findings whose title contains any of the keywords (case-insensitive)."""
+    """Return findings whose title or detail contains any of the keywords (case-insensitive)."""
     hits = []
     for f in findings:
-        title_lower = f.title.lower()
-        if any(kw.lower() in title_lower for kw in keywords):
+        combined = (f.title + " " + f.detail).lower()
+        if any(kw.lower() in combined for kw in keywords):
             hits.append(f)
     return hits
 
 
-def _high_entropy_png_with_appended(findings: List[Finding]):
-    png = _matches_title(findings, ["high entropy", "appended"])
-    zip_magic = _matches_title(findings, ["zip", "magic", "embedded"])
-    if png and zip_magic:
-        ids = [f.id for f in png + zip_magic]
-        return (0.82, ids, "High-entropy PNG with appended ZIP magic detected → likely binwalk extraction needed")
+def _conf(n_hits: int, *, weak: float = 0.35, strong: float = 0.80) -> float:
+    """Scale confidence from weak (1 signal) to strong (≥3 signals)."""
+    if n_hits >= 3:
+        return strong
+    if n_hits == 2:
+        return (weak + strong) / 2
+    return weak
+
+
+def _strip_markdown_fences(text: str) -> str:
+    """Remove markdown code fences (``` … ```) that models sometimes emit.
+
+    Despite the system prompt saying "no markdown", models occasionally wrap
+    their JSON response in triple-backtick fences.  Stripping them before
+    json.loads() is a practical defence.
+    """
+    text = text.strip()
+    # Remove opening fence line: ```json or just ```
+    text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+    # Remove closing fence
+    text = re.sub(r"\n?```\s*$", "", text)
+    return text.strip()
+
+
+# ---------------------------------------------------------------------------
+# 30 attack-pattern rule functions
+# ---------------------------------------------------------------------------
+
+# Rule 1
+def _r01_png_high_entropy_zip(findings: List[Finding]):
+    entropy_hits = _matches_title(findings, ["high entropy", "entropy anomaly"])
+    appended_hits = _matches_title(findings, ["appended", "overlay", "after eof", "after end"])
+    zip_hits = _matches_title(findings, ["zip magic", "pk magic", "zip header", "embedded zip", "zip archive"])
+    if (entropy_hits or appended_hits) and zip_hits:
+        all_hits = list({f.id: f for f in entropy_hits + appended_hits + zip_hits}.values())
+        return (_conf(len(all_hits), weak=0.40, strong=0.85), all_hits)
     return None
 
 
-def _rsa_small_e(findings: List[Finding]):
-    rsa = _matches_title(findings, ["rsa", "e=3", "small exponent"])
-    ct = _matches_title(findings, ["ciphertext", "encrypted"])
-    if rsa:
-        ids = [f.id for f in rsa + ct]
-        return (0.80, ids, "RSA with small public exponent (e=3) detected — cube root or Håstad broadcast applicable")
+# Rule 2
+def _r02_png_high_entropy_no_zip(findings: List[Finding]):
+    entropy_hits = _matches_title(findings, ["high entropy", "entropy anomaly"])
+    steg_hints = _matches_title(findings, ["lsb", "steganography", "steganalysis", "chi-square"])
+    zip_hits = _matches_title(findings, ["zip magic", "pk magic", "zip header", "embedded zip"])
+    if (entropy_hits or steg_hints) and not zip_hits:
+        all_hits = list({f.id: f for f in entropy_hits + steg_hints}.values())
+        if not all_hits:
+            return None
+        return (_conf(len(all_hits), weak=0.35, strong=0.75), all_hits)
     return None
 
 
-def _wiener_attack_hint(findings: List[Finding]):
-    hits = _matches_title(findings, ["wiener", "small private exponent"])
-    if hits:
-        ids = [f.id for f in hits]
-        return (0.88, ids, "Wiener's attack succeeded or is applicable")
-    return None
-
-
-def _base64_nested(findings: List[Finding]):
-    b64 = _matches_title(findings, ["base64"])
-    if len(b64) >= 2:
-        ids = [f.id for f in b64]
-        return (0.72, ids, "Multiple Base64 encodings found — nested encoding likely")
-    return None
-
-
-def _xor_encrypted(findings: List[Finding]):
-    xor = _matches_title(findings, ["xor"])
-    if xor:
-        max_conf = max(f.confidence for f in xor)
-        ids = [f.id for f in xor]
-        return (max_conf, ids, "XOR encryption/encoding detected")
-    return None
-
-
-def _lsb_steganography(findings: List[Finding]):
-    lsb = _matches_title(findings, ["lsb", "steganography", "steganalysis"])
-    if lsb:
-        ids = [f.id for f in lsb]
-        return (0.75, ids, "LSB steganography detected in image — use zsteg or steghide")
-    return None
-
-
-def _hash_found_crackable(findings: List[Finding]):
-    hashes = _matches_title(findings, ["hash found", "md5", "sha1", "sha256"])
-    if hashes:
-        cracked = _matches_title(findings, ["cracked", "decoded"])
-        if cracked:
-            ids = [f.id for f in hashes + cracked]
-            return (0.90, ids, "Hash found and cracked")
-        ids = [f.id for f in hashes]
-        return (0.65, ids, "Hash found — attempt wordlist cracking")
-    return None
-
-
-def _pcap_credentials(findings: List[Finding]):
-    hits = _matches_title(findings, ["credential", "http", "ftp", "smtp", "password"])
-    if hits:
-        ids = [f.id for f in hits]
-        return (0.78, ids, "Credentials or authentication traffic found in PCAP")
-    return None
-
-
-def _elf_overflow(findings: List[Finding]):
-    rop = _matches_title(findings, ["rop", "gadget", "ret2libc", "stack"])
-    fmtstr = _matches_title(findings, ["format string", "%n", "%s%s"])
-    if rop or fmtstr:
-        ids = [f.id for f in rop + fmtstr]
-        return (0.77, ids, "Exploit primitives detected (ROP gadgets / format string)")
-    return None
-
-
-def _zip_password_protected(findings: List[Finding]):
-    hits = _matches_title(findings, ["encrypted", "password-protected", "archive"])
-    if hits:
-        cracked = _matches_title(findings, ["cracked", "password found"])
-        if cracked:
-            ids = [f.id for f in hits + cracked]
-            return (0.88, ids, "Encrypted archive with cracked password")
-        ids = [f.id for f in hits]
-        return (0.60, ids, "Encrypted archive — try rockyou or extracted file strings as password")
-    return None
-
-
-def _morse_or_classical(findings: List[Finding]):
-    hits = _matches_title(findings, ["morse", "caesar", "vigenere", "rot13", "atbash", "rail fence"])
-    if hits:
-        ids = [f.id for f in hits]
-        return (0.70, ids, "Classical cipher or encoding detected")
-    return None
-
-
-def _flag_direct(findings: List[Finding]):
-    hits = [f for f in findings if f.flag_match and f.confidence >= 0.85]
-    if hits:
-        ids = [f.id for f in hits]
-        return (0.99, ids, "Direct flag match found at high confidence")
-    return None
-
-
-def _pdf_javascript(findings: List[Finding]):
-    hits = _matches_title(findings, ["javascript", "embedded", "pdf"])
-    if hits:
-        ids = [f.id for f in hits]
-        return (0.72, ids, "Suspicious PDF JavaScript or embedded object detected")
-    return None
-
-
-def _entropy_anomaly(findings: List[Finding]):
-    hits = _matches_title(findings, ["high entropy", "entropy"])
-    if hits:
-        ids = [f.id for f in hits]
-        return (0.60, ids, "High entropy region detected — possible encryption or compression")
-    return None
-
-
-def _polybius_or_tap(findings: List[Finding]):
-    hits = _matches_title(findings, ["polybius", "tap code", "baconian", "baudot"])
-    if hits:
-        ids = [f.id for f in hits]
-        return (0.68, ids, "Alternative encoding cipher detected")
-    return None
-
-
-def _rsa_factored(findings: List[Finding]):
-    hits = _matches_title(findings, ["factored", "factordb"])
-    if hits:
-        ids = [f.id for f in hits]
-        return (0.92, ids, "RSA modulus successfully factored — private key can be recovered")
-    return None
-
-
-def _common_modulus(findings: List[Finding]):
-    hits = _matches_title(findings, ["common modulus", "hastad", "broadcast"])
-    if hits:
-        ids = [f.id for f in hits]
-        return (0.85, ids, "RSA common modulus or Håstad broadcast vulnerability detected")
-    return None
-
-
-def _dns_covert(findings: List[Finding]):
-    hits = _matches_title(findings, ["dns", "covert", "tunnel"])
-    if hits:
-        ids = [f.id for f in hits]
-        return (0.70, ids, "DNS covert channel detected in PCAP")
-    return None
-
-
-def _file_hidden_in_image(findings: List[Finding]):
-    appended = _matches_title(findings, ["appended", "overlay", "after EOF", "after end"])
+# Rule 3
+def _r03_jpeg_appended(findings: List[Finding]):
+    appended = _matches_title(findings, ["appended", "overlay", "after eof", "after end", "jfif", "jpeg"])
+    exif_hints = _matches_title(findings, ["exif", "metadata", "comment", "password"])
     if appended:
-        ids = [f.id for f in appended]
-        return (0.75, ids, "Hidden data appended after image/file end — run binwalk or foremost")
+        all_hits = list({f.id: f for f in appended + exif_hints}.values())
+        return (_conf(len(all_hits), weak=0.38, strong=0.80), all_hits)
     return None
 
 
-def _magic_mismatch(findings: List[Finding]):
-    hits = _matches_title(findings, ["magic mismatch", "extension mismatch"])
+# Rule 4
+def _r04_wav_lsb(findings: List[Finding]):
+    wav_hits = _matches_title(findings, ["wav", "audio", "lsb anomaly", "lsb"])
+    if wav_hits:
+        return (_conf(len(wav_hits), weak=0.38, strong=0.78), wav_hits)
+    return None
+
+
+# Rule 5
+def _r05_audio_silence(findings: List[Finding]):
+    silence = _matches_title(findings, ["silence", "silent block", "dtmf", "morse"])
+    if silence:
+        return (_conf(len(silence), weak=0.35, strong=0.72), silence)
+    return None
+
+
+# Rule 6
+def _r06_zip_encrypted_passwords(findings: List[Finding]):
+    enc = _matches_title(findings, ["encrypted entr", "password-protected", "encrypted zip"])
+    pwcands = _matches_title(findings, ["password candidate", "strings", "wordlist"])
+    if enc and pwcands:
+        all_hits = list({f.id: f for f in enc + pwcands}.values())
+        return (_conf(len(all_hits), weak=0.55, strong=0.82), all_hits)
+    if enc:
+        return (0.40, enc)
+    return None
+
+
+# Rule 7
+def _r07_zip_comment(findings: List[Finding]):
+    hits = _matches_title(findings, ["zip comment", "archive comment", "comment non-empty", "comment:"])
     if hits:
-        ids = [f.id for f in hits]
-        return (0.72, ids, "File extension/magic byte mismatch — file may be disguised")
+        return (_conf(len(hits), weak=0.38, strong=0.72), hits)
     return None
 
+
+# Rule 8
+def _r08_elf_stack_overflow(findings: List[Finding]):
+    danger = _matches_title(findings, ["gets", "strcpy", "strcat", "dangerous import", "unsafe function"])
+    no_canary = _matches_title(findings, ["no canary", "canary: no", "stack canary not found", "nx: no"])
+    if danger:
+        all_hits = list({f.id: f for f in danger + no_canary}.values())
+        return (_conf(len(all_hits), weak=0.40, strong=0.82), all_hits)
+    return None
+
+
+# Rule 9
+def _r09_elf_format_string(findings: List[Finding]):
+    printf_hits = _matches_title(findings, ["printf", "fprintf", "sprintf"])
+    fmtstr_hints = _matches_title(findings, ["format string", "%n", "%p", "%s%s", "user-controlled format"])
+    if printf_hits and fmtstr_hints:
+        all_hits = list({f.id: f for f in printf_hits + fmtstr_hints}.values())
+        return (_conf(len(all_hits), weak=0.55, strong=0.85), all_hits)
+    if printf_hits:
+        return (0.35, printf_hits)
+    return None
+
+
+# Rule 10
+def _r10_rsa_small_e(findings: List[Finding]):
+    small_e = _matches_title(findings, ["e=3", "e = 3", "small exponent", "small public exponent"])
+    rsa = _matches_title(findings, ["rsa"])
+    if small_e or (rsa and small_e):
+        all_hits = list({f.id: f for f in small_e + rsa}.values())
+        return (_conf(len(all_hits), weak=0.45, strong=0.82), all_hits)
+    return None
+
+
+# Rule 11
+def _r11_rsa_factorable(findings: List[Finding]):
+    factored = _matches_title(findings, ["factored", "factordb", "factorable", "factor found"])
+    ct = _matches_title(findings, ["ciphertext", "encrypted message"])
+    if factored:
+        all_hits = list({f.id: f for f in factored + ct}.values())
+        return (_conf(len(all_hits), weak=0.65, strong=0.92), all_hits)
+    return None
+
+
+# Rule 12
+def _r12_rsa_common_modulus(findings: List[Finding]):
+    hits = _matches_title(findings, ["common modulus", "shared modulus", "hastad", "broadcast attack"])
+    if hits:
+        return (_conf(len(hits), weak=0.55, strong=0.88), hits)
+    return None
+
+
+# Rule 13
+def _r13_elf_upx_packed(findings: List[Finding]):
+    upx_hits = _matches_title(findings, ["upx", "packed", "packer detected", "upx magic"])
+    entropy = _matches_title(findings, ["high entropy"])
+    if upx_hits:
+        all_hits = list({f.id: f for f in upx_hits + entropy}.values())
+        return (_conf(len(all_hits), weak=0.60, strong=0.88), all_hits)
+    return None
+
+
+# Rule 14
+def _r14_elf_rwx_shellcode(findings: List[Finding]):
+    rwx = _matches_title(findings, ["rwx", "executable stack", "rwx segment", "writable executable"])
+    frida = _matches_title(findings, ["frida", "dynamic", "hook"])
+    if rwx:
+        all_hits = list({f.id: f for f in rwx + frida}.values())
+        return (_conf(len(all_hits), weak=0.45, strong=0.80), all_hits)
+    return None
+
+
+# Rule 15
+def _r15_xor_key_detected(findings: List[Finding]):
+    xor_key = _matches_title(findings, ["xor key", "key length detected", "xor with key"])
+    xor_generic = _matches_title(findings, ["xor"])
+    if xor_key:
+        all_hits = list({f.id: f for f in xor_key + xor_generic}.values())
+        return (_conf(len(all_hits), weak=0.60, strong=0.85), all_hits)
+    if xor_generic:
+        return (0.38, xor_generic)
+    return None
+
+
+# Rule 16
+def _r16_base64_to_binary(findings: List[Finding]):
+    b64_magic = _matches_title(findings, ["base64", "decoded magic", "base64 decodes to"])
+    magic = _matches_title(findings, ["magic bytes", "file signature", "magic mismatch"])
+    if b64_magic:
+        all_hits = list({f.id: f for f in b64_magic + magic}.values())
+        if len(all_hits) >= 2:
+            return (0.75, all_hits)
+        return (0.40, all_hits)
+    return None
+
+
+# Rule 17
+def _r17_ic_english_classical(findings: List[Finding]):
+    ic = _matches_title(findings, ["index of coincidence", "ic:", "ic =", "ic near 0.065"])
+    caesar = _matches_title(findings, ["caesar", "rot", "shift cipher"])
+    if ic or caesar:
+        all_hits = list({f.id: f for f in ic + caesar}.values())
+        return (_conf(len(all_hits), weak=0.40, strong=0.72), all_hits)
+    return None
+
+
+# Rule 18
+def _r18_ic_flat_vigenere(findings: List[Finding]):
+    vig = _matches_title(findings, ["vigenere", "vigenère", "kasiski", "flat ic", "ic near 0.045"])
+    transposition = _matches_title(findings, ["transposition", "columnar", "rail fence"])
+    if vig or transposition:
+        all_hits = list({f.id: f for f in vig + transposition}.values())
+        return (_conf(len(all_hits), weak=0.40, strong=0.75), all_hits)
+    return None
+
+
+# Rule 19
+def _r19_pdf_javascript(findings: List[Finding]):
+    js = _matches_title(findings, ["javascript", "embedded js", "/js", "/javascript"])
+    launch = _matches_title(findings, ["/launch", "launch action", "openaction"])
+    pdf = _matches_title(findings, ["pdf"])
+    if js and pdf:
+        all_hits = list({f.id: f for f in js + launch + pdf}.values())
+        return (_conf(len(all_hits), weak=0.42, strong=0.80), all_hits)
+    return None
+
+
+# Rule 20
+def _r20_dns_exfil(findings: List[Finding]):
+    dns = _matches_title(findings, ["dns exfil", "dns tunnel", "non-standard subdomain", "dns query"])
+    subdomain = _matches_title(findings, ["subdomain", "base64 label", "encoded label"])
+    if dns or subdomain:
+        all_hits = list({f.id: f for f in dns + subdomain}.values())
+        return (_conf(len(all_hits), weak=0.42, strong=0.78), all_hits)
+    return None
+
+
+# Rule 21
+def _r21_pcap_http_transfer(findings: List[Finding]):
+    http = _matches_title(findings, ["http file", "file transfer", "multipart", "content-disposition"])
+    carved = _matches_title(findings, ["carved file", "extracted file", "reassembled"])
+    if http:
+        all_hits = list({f.id: f for f in http + carved}.values())
+        return (_conf(len(all_hits), weak=0.40, strong=0.78), all_hits)
+    return None
+
+
+# Rule 22
+def _r22_pcap_tcp_covert(findings: List[Finding]):
+    covert = _matches_title(findings, ["repeated payload", "identical payload", "tcp covert", "covert channel"])
+    timing = _matches_title(findings, ["timing", "inter-arrival", "packet timing"])
+    if covert:
+        all_hits = list({f.id: f for f in covert + timing}.values())
+        return (_conf(len(all_hits), weak=0.38, strong=0.72), all_hits)
+    return None
+
+
+# Rule 23
+def _r23_sqlite_blobs(findings: List[Finding]):
+    blob = _matches_title(findings, ["blob", "blob column", "binary blob", "sqlite blob"])
+    sqlite = _matches_title(findings, ["sqlite", "database"])
+    if blob:
+        all_hits = list({f.id: f for f in blob + sqlite}.values())
+        return (_conf(len(all_hits), weak=0.42, strong=0.78), all_hits)
+    return None
+
+
+# Rule 24
+def _r24_disk_deleted_inodes(findings: List[Finding]):
+    deleted = _matches_title(findings, ["deleted inode", "deleted file", "unallocated", "tsk_recover"])
+    disk = _matches_title(findings, ["disk image", "filesystem", "partition", "ext2", "ext4", "fat32"])
+    if deleted:
+        all_hits = list({f.id: f for f in deleted + disk}.values())
+        return (_conf(len(all_hits), weak=0.45, strong=0.82), all_hits)
+    return None
+
+
+# Rule 25
+def _r25_elf_aes_ciphertext(findings: List[Finding]):
+    aes = _matches_title(findings, ["aes", "aes constant", "aes s-box", "crypto constant"])
+    ct = _matches_title(findings, ["ciphertext", "ciphertext-shaped", "encrypted input"])
+    if aes and ct:
+        all_hits = list({f.id: f for f in aes + ct}.values())
+        return (_conf(len(all_hits), weak=0.55, strong=0.85), all_hits)
+    if aes:
+        return (0.38, aes)
+    return None
+
+
+# Rule 26
+def _r26_high_entropy_no_magic(findings: List[Finding]):
+    entropy = _matches_title(findings, ["high entropy"])
+    no_magic = _matches_title(findings, ["no magic", "unknown format", "unrecognized magic", "magic mismatch"])
+    if entropy and no_magic:
+        all_hits = list({f.id: f for f in entropy + no_magic}.values())
+        return (_conf(len(all_hits), weak=0.42, strong=0.78), all_hits)
+    return None
+
+
+# Rule 27
+def _r27_hidden_text_layer(findings: List[Finding]):
+    hidden = _matches_title(findings, ["hidden text", "invisible text", "white-on-white", "occlusion",
+                                       "hidden layer", "watermark"])
+    doc = _matches_title(findings, ["docx", "pdf", "document"])
+    if hidden:
+        all_hits = list({f.id: f for f in hidden + doc}.values())
+        return (_conf(len(all_hits), weak=0.42, strong=0.78), all_hits)
+    return None
+
+
+# Rule 28
+def _r28_palette_anomaly(findings: List[Finding]):
+    palette = _matches_title(findings, ["palette anomaly", "palette", "color table", "clut"])
+    if palette:
+        return (_conf(len(palette), weak=0.38, strong=0.72), palette)
+    return None
+
+
+# Rule 29
+def _r29_elf_constructor(findings: List[Finding]):
+    ctor = _matches_title(findings, ["constructor", ".init", "init_array", "preinit_array", "ctor function"])
+    frida = _matches_title(findings, ["frida", "hook", "dynamic"])
+    if ctor:
+        all_hits = list({f.id: f for f in ctor + frida}.values())
+        return (_conf(len(all_hits), weak=0.38, strong=0.72), all_hits)
+    return None
+
+
+# Rule 30
+def _r30_ctf_framework_strings(findings: List[Finding]):
+    ctf_strings = _matches_title(findings, ["pwntools", "flag{", "ctf{", "picoctf{", "ductf{",
+                                             "flag pattern", "flag match"])
+    if ctf_strings:
+        return (_conf(len(ctf_strings), weak=0.55, strong=0.90), ctf_strings)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# _RULES list  (30 rules)
+# ---------------------------------------------------------------------------
 
 _RULES: List[_Rule] = [
+    # 1
     _Rule(
-        title="Direct flag match",
-        category="Flag",
-        match_fn=_flag_direct,
-        missing=[],
-        command="# Flag already found — check Flag Summary tab",
+        title="PNG high-entropy tail with appended ZIP — binwalk extraction",
+        category="steg",
+        match_fn=_r01_png_high_entropy_zip,
+        missing=["Confirm ZIP PK magic at file tail", "Check strings output for archive password"],
+        commands=[
+            "binwalk --extract --carve suspicious.png",
+            "strings suspicious.png | grep -i pass",
+        ],
+        transforms=["binwalk-extract", "strings-filter"],
     ),
+    # 2
     _Rule(
-        title="RSA factored — recover private key",
-        category="Crypto/RSA",
-        match_fn=_rsa_factored,
-        missing=[],
-        command="python3 -c \"p,q=FACTORS; d=pow(e,-1,(p-1)*(q-1)); print(pow(c,d,n).to_bytes(128,'big'))\"",
+        title="PNG high-entropy tail (no ZIP) — check steghide / LSB tools",
+        category="steg",
+        match_fn=_r02_png_high_entropy_no_zip,
+        missing=["Try steghide without password", "Run zsteg -a", "Check chi-square for LSB"],
+        commands=[
+            "zsteg -a image.png",
+            "steghide extract -sf image.png -p ''",
+            "outguess -r image.png output.txt",
+        ],
+        transforms=["lsb-extract-r", "lsb-extract-g", "lsb-extract-b"],
     ),
+    # 3
     _Rule(
-        title="Wiener's attack — small private exponent",
-        category="Crypto/RSA",
-        match_fn=_wiener_attack_hint,
-        missing=[],
-        command="# d already recovered by analyzer — use it to decrypt: pow(c,d,n)",
+        title="JPEG with appended data — binwalk, foremost, EXIF password hint",
+        category="steg",
+        match_fn=_r03_jpeg_appended,
+        missing=["Check EXIF comment field for password", "Inspect appended byte sequence"],
+        commands=[
+            "binwalk -e image.jpg",
+            "foremost -i image.jpg -o extracted/",
+            "exiftool image.jpg | grep -i comment",
+        ],
+        transforms=["binwalk-extract"],
     ),
+    # 4
     _Rule(
-        title="RSA Håstad broadcast / common modulus attack",
-        category="Crypto/RSA",
-        match_fn=_common_modulus,
-        missing=["Three ciphertexts encrypted with e=3 and different N"],
-        command="# Use CTF analyzer or RsaCtfTool: python3 RsaCtfTool.py --attack hastads",
+        title="Audio WAV with LSB anomaly — extract LSB payload",
+        category="steg",
+        match_fn=_r04_wav_lsb,
+        missing=["Determine bit depth and channel count", "Check for image or text magic in LSB stream"],
+        commands=[
+            "python3 -c \""
+            "import wave, struct; w=wave.open('audio.wav'); "
+            "frames=w.readframes(w.getnframes()); "
+            "lsb=bytes(b&1 for b in frames); "
+            "open('lsb_out.bin','wb').write(lsb)\"",
+            "file lsb_out.bin",
+        ],
+        transforms=["wav-lsb-extract"],
     ),
+    # 5
     _Rule(
-        title="RSA small exponent (e=3) cube root",
-        category="Crypto/RSA",
-        match_fn=_rsa_small_e,
-        missing=[],
-        command="python3 -c \"import gmpy2; print(gmpy2.iroot(c,3))\"",
+        title="Audio with silence blocks — check for Morse or DTMF",
+        category="steg",
+        match_fn=_r05_audio_silence,
+        missing=["Identify tone frequencies (DTMF: 697–1633 Hz)", "Map silence/tone pattern to Morse"],
+        commands=[
+            "sox audio.wav -n stat 2>&1 | grep -i silence",
+            "multimon-ng -a DTMF -t wav audio.wav",
+            "python3 -c \"import pydub; # analyse silence blocks\"",
+        ],
+        transforms=["morse-decode", "dtmf-decode"],
     ),
+    # 6
     _Rule(
-        title="PNG with appended ZIP — binwalk extraction",
-        category="Steganography",
-        match_fn=_high_entropy_png_with_appended,
-        missing=["Confirm ZIP magic at file tail"],
-        command="binwalk --extract --carve suspicious.png",
+        title="ZIP encrypted entries + password candidates — fcrackzip",
+        category="forensics",
+        match_fn=_r06_zip_encrypted_passwords,
+        missing=["Extract candidate passwords from strings findings", "Check ZIP comment for password hint"],
+        commands=[
+            "fcrackzip -u -D -p rockyou.txt archive.zip",
+            "strings archive.zip | tee candidates.txt && fcrackzip -u -D -p candidates.txt archive.zip",
+        ],
+        transforms=["base64-decode"],
     ),
+    # 7
     _Rule(
-        title="LSB steganography in image",
-        category="Steganography",
-        match_fn=_lsb_steganography,
-        missing=[],
-        command="zsteg -a image.png  # or: steghide extract -sf image.jpg",
+        title="ZIP comment non-empty — inspect for base64 or flag pattern",
+        category="forensics",
+        match_fn=_r07_zip_comment,
+        missing=["Decode comment if base64", "Check for embedded flag or password"],
+        commands=[
+            "python3 -c \"import zipfile; z=zipfile.ZipFile('archive.zip'); print(z.comment)\"",
+            "python3 -c \"import zipfile,base64; z=zipfile.ZipFile('archive.zip'); "
+            "print(base64.b64decode(z.comment))\"",
+        ],
+        transforms=["base64-decode"],
     ),
+    # 8
     _Rule(
-        title="File hidden after image/file end",
-        category="Forensics",
-        match_fn=_file_hidden_in_image,
-        missing=[],
-        command="binwalk -e file  # or: foremost -i file -o output/",
+        title="ELF with dangerous imports and no stack canary — classic stack overflow",
+        category="pwn",
+        match_fn=_r08_elf_stack_overflow,
+        missing=["Determine exact offset with cyclic()", "Identify win/flag function or libc gadgets"],
+        commands=[
+            "checksec --file=binary",
+            "ROPgadget --binary binary --rop | head -30",
+            "python3 -c \"from pwn import *; print(cyclic(256))\" | ./binary",
+        ],
+        transforms=[],
     ),
+    # 9
     _Rule(
-        title="File extension / magic byte mismatch",
-        category="Forensics",
-        match_fn=_magic_mismatch,
-        missing=[],
-        command="file suspicious_file  # then rename and open with correct tool",
+        title="ELF with printf + format string pattern — format string exploit",
+        category="pwn",
+        match_fn=_r09_elf_format_string,
+        missing=["Find format string offset with %N$p probe", "Identify target GOT entry to overwrite"],
+        commands=[
+            "python3 -c \"from pwn import *; p=process('./binary'); p.sendline(b'%7$p'); print(p.recvline())\"",
+            "checksec --file=binary",
+        ],
+        transforms=[],
     ),
+    # 10
     _Rule(
-        title="XOR encryption — key guessing",
-        category="Crypto/XOR",
-        match_fn=_xor_encrypted,
-        missing=[],
-        command="python3 -c \"data=open('file','rb').read(); [print(bytes(b^k for b in data[:100])) for k in range(256)]\"",
+        title="RSA small exponent (e=3) — Håstad broadcast or direct cube root",
+        category="crypto",
+        match_fn=_r10_rsa_small_e,
+        missing=["Collect three ciphertexts if Håstad applies", "Verify m^3 < n (direct root)"],
+        commands=[
+            "python3 -c \"import gmpy2; m,exact=gmpy2.iroot(c,3); print(m.to_bytes(128,'big') if exact else 'Need CRT')\"",
+            "python3 RsaCtfTool.py --attack hastads -n N1,N2,N3 -e 3 -c C1,C2,C3",
+        ],
+        transforms=[],
     ),
+    # 11
     _Rule(
-        title="Nested Base64 encoding",
-        category="Encoding",
-        match_fn=_base64_nested,
-        missing=[],
-        command="python3 -c \"import base64; s=open('file').read().strip(); s2=base64.b64decode(s); print(base64.b64decode(s2))\"",
+        title="RSA public key + ciphertext + factorable N — direct decryption",
+        category="crypto",
+        match_fn=_r11_rsa_factorable,
+        missing=["Retrieve factors from factordb.com"],
+        commands=[
+            "python3 -c \""
+            "p,q=FACTORS; n=p*q; e=65537; "
+            "d=pow(e,-1,(p-1)*(q-1)); "
+            "print(pow(c,d,n).to_bytes(256,'big').lstrip(b'\\x00'))\"",
+            "python3 RsaCtfTool.py --publickey key.pem --uncipherfile cipher.bin",
+        ],
+        transforms=[],
     ),
+    # 12
     _Rule(
-        title="Hash cracking — wordlist attack",
-        category="Crypto/Hash",
-        match_fn=_hash_found_crackable,
-        missing=[],
-        command="john --wordlist=rockyou.txt hashfile  # or: hashcat -a 0 hash.txt rockyou.txt",
+        title="RSA common modulus across two keypairs — common modulus attack",
+        category="crypto",
+        match_fn=_r12_rsa_common_modulus,
+        missing=["Confirm same n used with two different e values", "Obtain both ciphertexts"],
+        commands=[
+            "python3 RsaCtfTool.py --attack commonmodulus",
+            "python3 -c \""
+            "# Extended Euclidean: find s1,s2 such that s1*e1 + s2*e2 = 1, then m = pow(c1,s1,n)*pow(c2,s2,n)%n; "
+            "from math import gcd; "
+            "def egcd(a,b): return (a,1,0) if b==0 else (lambda g,x,y:(g,y,x-a//b*y))(*egcd(b,a%b)); "
+            "g,s1,s2=egcd(e1,e2); "
+            "m=(pow(c1,s1,n)*pow(c2,s2,n))%n; "
+            "print(m.to_bytes(256,'big').lstrip(b'\\\\x00'))\"",
+        ],
+        transforms=[],
     ),
+    # 13
     _Rule(
-        title="PCAP credential extraction",
-        category="Network",
-        match_fn=_pcap_credentials,
-        missing=[],
-        command="tshark -r capture.pcap -Y 'http.request' -T fields -e http.authorization",
+        title="ELF packed with UPX — unpack first",
+        category="rev",
+        match_fn=_r13_elf_upx_packed,
+        missing=["Verify stub signature", "Re-run analysis after unpacking"],
+        commands=[
+            "upx -d packed_binary -o unpacked_binary",
+            "file unpacked_binary && strings unpacked_binary | head -40",
+        ],
+        transforms=[],
     ),
+    # 14
     _Rule(
-        title="Encrypted archive — password cracking",
-        category="Archive",
-        match_fn=_zip_password_protected,
-        missing=[],
-        command="fcrackzip -u -D -p rockyou.txt archive.zip  # or: john --format=zip archive.zip",
+        title="ELF with RWX segment (Frida detected) — dump and re-analyze as shellcode",
+        category="rev",
+        match_fn=_r14_elf_rwx_shellcode,
+        missing=["Identify address range of RWX segment", "Capture dumped bytes at runtime"],
+        commands=[
+            "frida-trace -n PROCESS -i 'mmap'",
+            "frida -n PROCESS -e \"Process.enumerateRanges('rwx').forEach(r => console.log(JSON.stringify(r)))\"",
+        ],
+        transforms=[],
     ),
+    # 15
     _Rule(
-        title="ELF exploit — ROP / format string",
-        category="Binary/Pwn",
-        match_fn=_elf_overflow,
-        missing=[],
-        command="ROPgadget --binary binary --rop  # or: checksec binary",
+        title="XOR-encoded region with detected key length — decode and re-analyze",
+        category="crypto",
+        match_fn=_r15_xor_key_detected,
+        missing=["Confirm key by checking decoded output for printable text or magic bytes"],
+        commands=[
+            "python3 -c \""
+            "data=open('file','rb').read(); key=b'KEY'; "
+            "out=bytes(data[i]^key[i%len(key)] for i in range(len(data))); "
+            "open('decoded.bin','wb').write(out)\"",
+            "file decoded.bin && strings decoded.bin | head -20",
+        ],
+        transforms=["xor-decode", "hex-view"],
     ),
+    # 16
     _Rule(
-        title="Classical cipher / encoding",
-        category="Encoding",
-        match_fn=_morse_or_classical,
-        missing=[],
-        command="# Use CyberChef or the CTF Hunter Transform Pipeline for decode chain",
+        title="Base64 string decodes to binary magic bytes — treat as new file",
+        category="forensics",
+        match_fn=_r16_base64_to_binary,
+        missing=["Identify magic bytes in decoded output", "Re-analyze decoded file with appropriate analyzer"],
+        commands=[
+            "python3 -c \"import base64; open('decoded.bin','wb').write(base64.b64decode(open('input.txt').read()))\"",
+            "file decoded.bin",
+        ],
+        transforms=["base64-decode", "file-type-detect"],
     ),
+    # 17
     _Rule(
-        title="PDF suspicious JavaScript / embedded object",
-        category="Document",
-        match_fn=_pdf_javascript,
-        missing=[],
-        command="pdf-parser --search javascript suspicious.pdf",
+        title="Classical cipher — IC near English (0.065): likely Caesar/ROT",
+        category="crypto",
+        match_fn=_r17_ic_english_classical,
+        missing=["Try all 25 ROT shifts", "Check for ROT13 specifically"],
+        commands=[
+            "python3 -c \""
+            "ct=open('cipher.txt').read().upper(); "
+            "[print(f'ROT{i}:', ''.join(chr((ord(c)-65+i)%26+65) if c.isalpha() else c for c in ct)) "
+            "for i in range(26)]\"",
+        ],
+        transforms=["rot-bruteforce"],
     ),
+    # 18
     _Rule(
-        title="High entropy region — likely encrypted/compressed",
-        category="Forensics",
-        match_fn=_entropy_anomaly,
-        missing=["Identify algorithm (magic bytes, key material, IVs)"],
-        command="binwalk --entropy file  # identify high-entropy sections",
+        title="Classical cipher — IC near flat (0.045): likely Vigenère/transposition",
+        category="crypto",
+        match_fn=_r18_ic_flat_vigenere,
+        missing=["Run Kasiski examination to find key length", "Try columnar transposition"],
+        commands=[
+            "python3 -c \""
+            "# Kasiski: find repeated trigrams and GCD their distances"
+            "import re; ct=open('cipher.txt').read().upper(); "
+            "trigrams={}; "
+            "[trigrams.setdefault(ct[i:i+3],[]).append(i) for i in range(len(ct)-2)]; "
+            "print({k:v for k,v in trigrams.items() if len(v)>1})\"",
+        ],
+        transforms=["vigenere-kasiski", "vigenere-decode"],
     ),
+    # 19
     _Rule(
-        title="Alternative encoding (Polybius / Tap / Baconian / Baudot)",
-        category="Encoding",
-        match_fn=_polybius_or_tap,
-        missing=[],
-        command="# Use CyberChef or CTF Hunter Transform Pipeline — Polybius/Tap decode",
+        title="PDF with embedded JavaScript — extract and analyze JS, check /Launch",
+        category="forensics",
+        match_fn=_r19_pdf_javascript,
+        missing=["Check for /Launch actions", "Look for obfuscated JS eval() calls"],
+        commands=[
+            "pdf-parser.py --search javascript suspicious.pdf",
+            "peepdf suspicious.pdf",
+            "pdfid.py suspicious.pdf",
+        ],
+        transforms=[],
     ),
+    # 20
     _Rule(
-        title="DNS covert channel in PCAP",
-        category="Network",
-        match_fn=_dns_covert,
-        missing=[],
-        command="tshark -r capture.pcap -Y dns -T fields -e dns.qry.name | sort -u",
+        title="PCAP DNS exfiltration — reconstruct from non-standard subdomain labels",
+        category="forensics",
+        match_fn=_r20_dns_exfil,
+        missing=["Identify base domain", "Reconstruct payload from ordered labels"],
+        commands=[
+            "tshark -r capture.pcap -Y 'dns' -T fields -e dns.qry.name | sort -u",
+            "python3 -c \""
+            "import scapy.all as s; pkts=s.rdpcap('capture.pcap'); "
+            "[print(p[s.DNS].qd.qname) for p in pkts if p.haslayer(s.DNS) and p[s.DNS].qd]\"",
+        ],
+        transforms=["base64-decode"],
+    ),
+    # 21
+    _Rule(
+        title="PCAP HTTP file transfer — carve and re-analyze transferred file",
+        category="forensics",
+        match_fn=_r21_pcap_http_transfer,
+        missing=["Identify Content-Type of transfer", "Re-analyze carved file"],
+        commands=[
+            "tshark -r capture.pcap --export-objects http,exported/",
+            "foremost -i capture.pcap -o carved/",
+        ],
+        transforms=["file-type-detect"],
+    ),
+    # 22
+    _Rule(
+        title="PCAP repeated identical TCP payloads — covert channel encoding",
+        category="forensics",
+        match_fn=_r22_pcap_tcp_covert,
+        missing=["Analyse payload bit patterns", "Check inter-arrival timing for binary encoding"],
+        commands=[
+            "tshark -r capture.pcap -Y tcp -T fields -e data.data | sort | uniq -c | sort -rn | head",
+            "python3 -c \""
+            "import scapy.all as s; pkts=s.rdpcap('capture.pcap'); "
+            "[print(bytes(p[s.TCP].payload)) for p in pkts if p.haslayer(s.TCP)]\"",
+        ],
+        transforms=[],
+    ),
+    # 23
+    _Rule(
+        title="SQLite with blob columns — extract blobs and re-analyze",
+        category="forensics",
+        match_fn=_r23_sqlite_blobs,
+        missing=["Identify table/column containing blobs", "Re-analyze each blob as a file"],
+        commands=[
+            "sqlite3 database.db '.tables'",
+            "python3 -c \""
+            "import sqlite3; con=sqlite3.connect('database.db'); "
+            "for row in con.execute('SELECT * FROM tablename'): "
+            "  open(f'blob_{row[0]}.bin','wb').write(row[1])\"",
+        ],
+        transforms=["file-type-detect"],
+    ),
+    # 24
+    _Rule(
+        title="Disk image with deleted inodes — recover with tsk_recover",
+        category="forensics",
+        match_fn=_r24_disk_deleted_inodes,
+        missing=["List deleted inodes", "Re-analyze each recovered file"],
+        commands=[
+            "tsk_recover -e disk.img recovered/",
+            "fls -r -d disk.img",
+            "icat disk.img INODE_NUM > recovered_file",
+        ],
+        transforms=["file-type-detect"],
+    ),
+    # 25
+    _Rule(
+        title="ELF/SO with AES constants + ciphertext-shaped input — try AES modes",
+        category="rev",
+        match_fn=_r25_elf_aes_ciphertext,
+        missing=["Locate key and IV in binary strings or fixed bytes", "Try ECB, CBC, CTR modes"],
+        commands=[
+            "python3 -c \""
+            "from Crypto.Cipher import AES; "
+            "key=b'KEYKEYKEYKEY1234'; iv=b'\\x00'*16; "
+            "ct=open('ciphertext.bin','rb').read(); "
+            "print(AES.new(key,AES.MODE_CBC,iv).decrypt(ct))\"",
+            "strings binary | xxd | grep -A2 'AES'",
+        ],
+        transforms=[],
+    ),
+    # 26
+    _Rule(
+        title="High entropy binary with no recognizable magic — decompress or XOR-deobfuscate",
+        category="forensics",
+        match_fn=_r26_high_entropy_no_magic,
+        missing=["Try all common compression formats", "Brute-force single-byte XOR first"],
+        commands=[
+            "python3 -c \""
+            "data=open('file','rb').read(); "
+            "[open(f'xor_{k}.bin','wb').write(bytes(b^k for b in data)) for k in range(256)]\"",
+            "zlib-flate -uncompress < file > out.bin 2>/dev/null || true",
+            "python3 -c \"import gzip,bz2,lzma; data=open('file','rb').read(); "
+            "[print(f,d[:40]) for f,fn in [('gzip',gzip.decompress),('bz2',bz2.decompress),('lzma',lzma.decompress)] "
+            "for d in [fn(data)] if d]\"",
+        ],
+        transforms=["zlib-decompress", "gzip-decompress", "xor-brute"],
+    ),
+    # 27
+    _Rule(
+        title="DOCX/PDF with hidden text or white-on-white layer — extract raw streams",
+        category="forensics",
+        match_fn=_r27_hidden_text_layer,
+        missing=["Diff visible vs raw text content", "Check font color == background color"],
+        commands=[
+            "python3 -m docx2txt document.docx | cat",
+            "pdftotext -layout suspicious.pdf -",
+            "python3 -c \""
+            "import fitz; doc=fitz.open('suspicious.pdf'); "
+            "[print(p.get_text()) for p in doc]\"",
+        ],
+        transforms=["text-extract"],
+    ),
+    # 28
+    _Rule(
+        title="Image with palette anomaly — check palette entries for hidden data",
+        category="steg",
+        match_fn=_r28_palette_anomaly,
+        missing=["Print all palette RGBA entries", "Check for non-standard alpha or color ordering"],
+        commands=[
+            "python3 -c \""
+            "from PIL import Image; img=Image.open('image.png'); "
+            "pal=img.getpalette(); "
+            "[print(i,pal[i*3:i*3+3]) for i in range(256) if pal]\"",
+            "zsteg image.png",
+        ],
+        transforms=["palette-extract"],
+    ),
+    # 29
+    _Rule(
+        title="ELF with constructor functions detected — hook with Frida, log side effects",
+        category="rev",
+        match_fn=_r29_elf_constructor,
+        missing=["List all .init_array entries", "Check for self-modifying code in constructors"],
+        commands=[
+            "readelf -d binary | grep INIT",
+            "frida-trace -f ./binary -i '*'",
+            "frida -f ./binary --no-pause -e \""
+            "Process.enumerateModules().forEach(m => {"
+            "console.log(m.name, m.base)})\"",
+        ],
+        transforms=[],
+    ),
+    # 30
+    _Rule(
+        title="Binary contains CTF framework strings — extract all flag-pattern matches",
+        category="forensics",
+        match_fn=_r30_ctf_framework_strings,
+        missing=["Rank candidates by surrounding context entropy", "Check for encoded/obfuscated flags"],
+        commands=[
+            "strings binary | grep -E '(flag|CTF|picoCTF|DUCTF|HTB)\\{[^}]+\\}'",
+            "python3 -c \""
+            "import re; data=open('binary','rb').read().decode('latin-1'); "
+            "matches=re.findall(r'[A-Za-z0-9_]+\\{[^}]+\\}', data); "
+            "[print(m) for m in matches]\"",
+        ],
+        transforms=["strings-filter", "regex-extract"],
     ),
 ]
 
@@ -389,6 +834,21 @@ _RULES: List[_Rule] = [
 # Engine
 # ---------------------------------------------------------------------------
 
+_AI_SYSTEM_PROMPT = (
+    "You are an expert CTF solver. You will receive a JSON summary of findings from "
+    "automated analysis of a CTF challenge file. Do NOT describe or re-explain what the "
+    "JSON contains. Respond with a JSON object only, no prose, no markdown. "
+    "The JSON object must have these keys:\n"
+    '- "category": the most likely CTF challenge category\n'
+    '- "confidence": your confidence as a float 0.0-1.0\n'
+    '- "primary_target": the single most suspicious function, string, or artifact to investigate first\n'
+    '- "vulnerability_class": the most likely vulnerability or technique required\n'
+    '- "attack_steps": an ordered array of concrete steps, each with "step" (int), '
+    '"action" (str), and "command" (str or null)\n'
+    '- "flag_format_guess": your best guess at the flag format based on any patterns in the findings'
+)
+
+
 class HypothesisEngine:
     """
     Generates ordered attack hypotheses from session findings.
@@ -396,28 +856,30 @@ class HypothesisEngine:
     Usage::
 
         engine = HypothesisEngine(ai_client=ai_client)
-        hypotheses = engine.generate(session)
+        hypotheses = engine.run(session)
+        # generate() is an alias for backward compatibility
     """
 
     def __init__(self, ai_client=None) -> None:
         self._ai_client = ai_client
 
-    def generate(self, session: Session) -> List[Hypothesis]:
+    def run(self, session: Session) -> List[Hypothesis]:
         """Return an ordered list of Hypothesis objects (highest confidence first)."""
         findings = [f for f in session.findings if f.duplicate_of is None]
 
         hypotheses: List[Hypothesis] = []
 
-        # Rule-based path
+        # Rule-based path (always runs, no API key required)
         hypotheses.extend(self._rule_based(findings))
 
-        # AI-augmented path
+        # AI-augmented path (runs additionally if API key configured)
         if self._ai_client and self._ai_client.available:
             ai_hyps = self._ai_augmented(findings, session)
             hypotheses.extend(ai_hyps)
 
         # Sort by confidence descending
         hypotheses.sort(key=lambda h: -h.confidence)
+
         # Deduplicate by title
         seen_titles: set = set()
         unique: List[Hypothesis] = []
@@ -427,6 +889,10 @@ class HypothesisEngine:
                 unique.append(h)
         return unique
 
+    def generate(self, session: Session) -> List[Hypothesis]:
+        """Alias for run() — retained for backward compatibility."""
+        return self.run(session)
+
     # ------------------------------------------------------------------
 
     def _rule_based(self, findings: List[Finding]) -> List[Hypothesis]:
@@ -435,19 +901,20 @@ class HypothesisEngine:
             try:
                 match = rule.match_fn(findings)
             except Exception:
+                logger.debug("Rule %r raised an exception", rule.title, exc_info=True)
                 continue
             if match is None:
                 continue
-            confidence, required_ids, reasoning = match
+            confidence, matching_findings = match
             results.append(Hypothesis(
                 title=rule.title,
                 confidence=confidence,
                 category=rule.category,
-                required_findings=required_ids,
+                present_findings=[f.title for f in matching_findings],
                 missing_findings=rule.missing,
-                suggested_command=rule.command,
-                reasoning=reasoning,
-                source="rule",
+                suggested_commands=rule.commands,
+                suggested_transforms=rule.transforms,
+                source="rules",
             ))
         return results
 
@@ -458,7 +925,7 @@ class HypothesisEngine:
         findings: List[Finding],
         session: Session,
     ) -> List[Hypothesis]:
-        """Call Claude to generate AI-powered hypotheses."""
+        """Call Claude with the CTF-solver system prompt; inject AI hypotheses."""
         top = sorted(
             [f for f in findings if f.confidence >= 0.4],
             key=lambda f: -f.confidence,
@@ -476,43 +943,65 @@ class HypothesisEngine:
             for f in top
         ]
 
-        prompt = (
-            "You are an expert CTF solver. Given the following findings from an automated analysis tool, "
-            "identify the most likely challenge category and return a JSON attack plan.\n\n"
-            "Findings:\n"
-            + json.dumps(summary, indent=2)
-            + "\n\nReturn ONLY a JSON object with this schema:\n"
-            "{\n"
-            '  "category": "string",\n'
-            '  "techniques": ["string"],\n'
-            '  "ordered_steps": ["string"],\n'
-            '  "flag_format_guess": "string",\n'
-            '  "hypotheses": [\n'
-            '    {"title": "string", "confidence": 0.0-1.0, "reasoning": "string", "command": "string"}\n'
-            "  ]\n"
-            "}"
-        )
+        user_message = json.dumps(summary, indent=2)
 
         try:
-            response = self._ai_client.complete(prompt)
-            # Extract JSON from response
-            json_match = re.search(r"\{[\s\S]+\}", response)
-            if not json_match:
-                return []
-            data = json.loads(json_match.group())
-            results: List[Hypothesis] = []
-            for h in data.get("hypotheses", []):
-                results.append(Hypothesis(
-                    title=h.get("title", "AI Hypothesis"),
-                    confidence=float(h.get("confidence", 0.5)),
-                    category=data.get("category", "Unknown"),
-                    required_findings=[],
-                    missing_findings=[],
-                    suggested_command=h.get("command", ""),
-                    reasoning=h.get("reasoning", ""),
-                    source="ai",
-                ))
-            return results
+            response = self._ai_client.complete_with_system(
+                system_prompt=_AI_SYSTEM_PROMPT,
+                user_message=user_message,
+            )
         except Exception as exc:
-            logger.debug("AI hypothesis generation failed: %s", exc)
+            logger.warning("AI hypothesis call failed: %s", exc)
             return []
+
+        # Strip markdown code fences that models sometimes emit despite instructions.
+        # e.g. ```json\n{...}\n``` or ```\n{...}\n```
+        clean = _strip_markdown_fences(response)
+
+        # Strict JSON parse — discard silently if still invalid after stripping
+        try:
+            data = json.loads(clean)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning(
+                "AI response was not valid JSON — discarding. Response preview: %.200s",
+                str(response),
+            )
+            return []
+
+        category = str(data.get("category", "unknown")).lower()
+        confidence = float(data.get("confidence", 0.5))
+        primary_target = str(data.get("primary_target", ""))
+        vuln_class = str(data.get("vulnerability_class", ""))
+        flag_fmt = str(data.get("flag_format_guess", ""))
+
+        # Build ordered command list from attack_steps
+        commands: List[str] = []
+        for step in data.get("attack_steps", []):
+            if isinstance(step, dict):
+                cmd = step.get("command")
+                action = step.get("action", "")
+                if cmd:
+                    commands.append(f"# Step {step.get('step', '?')}: {action}\n{cmd}")
+                elif action:
+                    commands.append(f"# {action}")
+
+        reasoning = (
+            f"Primary target: {primary_target}\n"
+            f"Vulnerability class: {vuln_class}\n"
+            f"Flag format guess: {flag_fmt}"
+        )
+
+        results: List[Hypothesis] = [
+            Hypothesis(
+                title=f"AI Analysis: {vuln_class or category}",
+                confidence=confidence,
+                category=category,
+                present_findings=[],
+                missing_findings=[],
+                suggested_commands=commands,
+                suggested_transforms=[],
+                source="ai",
+                reasoning=reasoning,
+            )
+        ]
+        return results
