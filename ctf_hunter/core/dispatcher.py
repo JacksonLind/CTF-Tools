@@ -264,6 +264,67 @@ def _read_header(path: str) -> bytes:
         return b""
 
 
+def analyze_file(
+    path: str,
+    session: "Session",
+    analyzers: Optional[List[str]] = None,
+    virtual_name: str = "",
+    ai_client: Optional[AIClient] = None,
+) -> List[Finding]:
+    """Run a specific subset of analyzers on *path* and return deduplicated findings.
+
+    This entry-point is used by :class:`~ctf_hunter.core.content_redispatcher.ContentRedispatcher`
+    to re-dispatch extracted content blobs through the existing analyzer suite as
+    if they were freshly-dropped files.
+
+    Args:
+        path: Filesystem path to the (possibly temporary) file to analyze.
+        session: Active analysis session; provides ``flag_pattern`` and ``depth``.
+        analyzers: Analyzer registry keys to run.  Pass ``None`` or ``[]`` to run
+            nothing (returns an empty list).
+        virtual_name: Human-readable name shown in findings instead of *path*.
+        ai_client: Optional AI client forwarded to each analyzer.
+
+    Returns:
+        Deduplicated list of :class:`~ctf_hunter.core.report.Finding` objects.
+    """
+    if not analyzers:
+        return []
+
+    try:
+        flag_pattern: re.Pattern = re.compile(
+            getattr(session, "flag_pattern", r"CTF\{[^}]+\}")
+        )
+    except re.error:
+        flag_pattern = re.compile(r"CTF\{[^}]+\}")
+
+    depth: str = getattr(session, "depth", "fast") or "fast"  # guard against empty string
+
+    all_findings: List[Finding] = []
+    for key in analyzers:
+        cls = _ANALYZER_REGISTRY.get(key)
+        if cls is None:
+            continue
+        try:
+            a = cls()
+            new_findings = a.analyze(path, flag_pattern, depth, ai_client)
+            if virtual_name:
+                for f in new_findings:
+                    f.file = virtual_name
+            all_findings.extend(new_findings)
+        except Exception as exc:
+            all_findings.append(Finding(
+                file=virtual_name or path,
+                analyzer=key,
+                title=f"Analyzer error in {key}",
+                severity="INFO",
+                detail=str(exc),
+                confidence=0.1,
+            ))
+
+    return deduplicate(all_findings)
+
+
 def _identify_analyzers(path: str, data: bytes) -> list[str]:
     keys: list[str] = []
 
