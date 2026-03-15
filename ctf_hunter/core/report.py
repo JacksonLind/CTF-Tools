@@ -9,6 +9,8 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Optional
 
+from .key_registry import KeyRegistry
+
 # Valid triage states
 TRIAGE_STATES = ("untriaged", "promising", "investigating", "dead_end", "confirmed_flag")
 
@@ -57,6 +59,8 @@ class Session:
     depth: str = "fast"    # fast | deep | auto
     watchfolder_path: str = ""
     pipeline_configs: list[dict] = field(default_factory=list)  # saved transform pipelines
+    # Runtime-only: never serialised to disk; always initialised fresh on load.
+    key_registry: KeyRegistry = field(default_factory=KeyRegistry, repr=False)
 
     def to_dict(self) -> dict:
         return {
