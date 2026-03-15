@@ -263,6 +263,7 @@ class SteganalysisAnalyzer(Analyzer):
     def _analyze_image(self, path: str, flag_pattern: re.Pattern, depth: str) -> List[Finding]:
         findings: List[Finding] = []
         findings.extend(self._img_lsb_extraction(path, flag_pattern))
+        findings.extend(self._img_lsb_interleaved_rgb(path, flag_pattern))
         findings.extend(self._img_appended_data(path, flag_pattern))
         findings.extend(self._img_metadata_stego(path, flag_pattern))
         if depth == "deep":
@@ -359,6 +360,71 @@ class SteganalysisAnalyzer(Analyzer):
                     detail, severity=severity, offset=0,
                     flag_match=flag_match, confidence=confidence,
                 ))
+
+        return findings
+
+    def _img_lsb_interleaved_rgb(self, path: str, flag_pattern: re.Pattern) -> List[Finding]:
+        """Interleaved RGB LSB extraction: bits are read R→G→B→R→G→B pixel by pixel, stopping at null."""
+        findings: List[Finding] = []
+        try:
+            from PIL import Image
+            import numpy as np
+        except ImportError:
+            return findings
+        try:
+            img = Image.open(path)
+            arr = np.array(img)
+        except Exception:
+            return findings
+
+        # Only applicable to images with at least three channels (R, G, B)
+        if arr.ndim < 3:
+            return findings
+        if arr.shape[2] < 3:
+            return findings
+
+        # Flatten pixels in row-major order, then interleave LSBs: R0,G0,B0,R1,G1,B1,...
+        pixels = arr.reshape(-1, arr.shape[2])
+        result = bytearray()
+        bit_buf: int = 0
+        bit_count: int = 0
+        stop = False
+        for px in pixels:
+            for ch in (0, 1, 2):
+                bit_buf = (bit_buf << 1) | (int(px[ch]) & 1)
+                bit_count += 1
+                if bit_count == 8:
+                    if bit_buf == 0:
+                        stop = True
+                        break
+                    result.append(bit_buf)
+                    bit_buf = 0
+                    bit_count = 0
+            if stop:
+                break
+
+        if not result:
+            return findings
+
+        raw = bytes(result)
+        text = raw.decode("latin-1")
+
+        try:
+            flag_match = bool(flag_pattern.search(text))
+        except Exception:
+            flag_match = False
+
+        if flag_match or _is_printable(raw):
+            detail = f"Interleaved RGB LSB: {text!r}  hex={raw[:64].hex()}"
+            findings.append(self._finding(
+                path,
+                "Interleaved RGB LSB extraction (R→G→B per pixel, null-terminated)",
+                detail,
+                severity="HIGH",
+                offset=0,
+                flag_match=flag_match,
+                confidence=_FLAG_CONF if flag_match else _PRINT_CONF,
+            ))
 
         return findings
 
