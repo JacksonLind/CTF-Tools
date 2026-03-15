@@ -47,7 +47,7 @@ def run_exiftool(path: str) -> dict[str, str]:
             )
             import json
             data = json.loads(out.decode("utf-8", errors="replace"))
-            return data[0] if data else {}
+            return data[0] if isinstance(data, list) and data else {}
         except Exception:
             pass
     # Pillow fallback for images
@@ -55,7 +55,7 @@ def run_exiftool(path: str) -> dict[str, str]:
         from PIL import Image
         from PIL.ExifTags import TAGS
         img = Image.open(path)
-        exif_data = img._getexif()
+        exif_data = img.getexif()
         if exif_data:
             return {TAGS.get(k, str(k)): str(v) for k, v in exif_data.items()}
         info = img.info or {}

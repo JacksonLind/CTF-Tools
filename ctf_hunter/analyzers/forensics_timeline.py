@@ -165,7 +165,7 @@ class ForensicsTimelineAnalyzer(Analyzer):
             from PIL import Image
             from PIL.ExifTags import TAGS
             img = Image.open(path)
-            exif = img._getexif()
+            exif = img.getexif()
             if not exif:
                 return
             tag_names = {v: k for k, v in TAGS.items()}

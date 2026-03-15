@@ -659,10 +659,7 @@ class SteganalysisAnalyzer(Analyzer):
             from PIL import Image
             from PIL.ExifTags import TAGS
             img = Image.open(path)
-            try:
-                exif_data = img._getexif() or {}
-            except Exception:
-                exif_data = {}
+            exif_data = img.getexif()
             for tag_id, value in exif_data.items():
                 tag_name = TAGS.get(tag_id, str(tag_id))
                 s = str(value)
