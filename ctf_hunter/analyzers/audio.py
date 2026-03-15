@@ -110,7 +110,8 @@ class AudioAnalyzer(Analyzer):
         i = 0
         silence_start = None
         while i + SAMPLE_BYTES <= len(raw):
-            # Read one multi-channel frame and take the max amplitude across all channels
+            # Read one interleaved multi-channel frame; check each channel at its
+            # correct byte offset and take the max amplitude across all channels.
             frame = raw[i:i + SAMPLE_BYTES]
             if sampwidth == 1:
                 amplitude = max(abs(frame[c] - 128) for c in range(nchannels))
