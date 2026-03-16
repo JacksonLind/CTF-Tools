@@ -22,6 +22,7 @@ _STYLESHEET = """
 /* ── Global clean-up ──────────────────────────────────────────── */
 QMainWindow, QWidget {
     font-size: 13px;
+    background-color: #d6d6d6;
 }
 
 QToolBar {
@@ -33,7 +34,7 @@ QToolBar QLabel {
 }
 
 QTabWidget::pane {
-    border: 1px solid #c0c0c0;
+    border: 1px solid #a0a0a0;
     border-radius: 3px;
 }
 QTabBar::tab {
@@ -45,7 +46,7 @@ QTabBar::tab:selected {
 }
 
 QTreeWidget {
-    alternate-background-color: #f7f7f7;
+    alternate-background-color: #cacaca;
 }
 QTreeWidget::item {
     padding: 2px 0;
@@ -53,7 +54,7 @@ QTreeWidget::item {
 
 QGroupBox {
     font-weight: bold;
-    border: 1px solid #d0d0d0;
+    border: 1px solid #b0b0b0;
     border-radius: 4px;
     margin-top: 8px;
     padding-top: 14px;
@@ -65,22 +66,22 @@ QGroupBox::title {
 }
 
 QTextEdit[readOnly="true"] {
-    background-color: #fafafa;
-    border: 1px solid #d8d8d8;
+    background-color: #dcdcdc;
+    border: 1px solid #b8b8b8;
     border-radius: 3px;
 }
 
 QPushButton {
     padding: 4px 10px;
-    border: 1px solid #c0c0c0;
+    border: 1px solid #a0a0a0;
     border-radius: 3px;
-    background: #f5f5f5;
+    background: #cfcfcf;
 }
 QPushButton:hover {
-    background: #e8e8e8;
+    background: #c0c0c0;
 }
 QPushButton:pressed {
-    background: #d8d8d8;
+    background: #b0b0b0;
 }
 QPushButton:checked {
     background: #ddeeff;
@@ -89,12 +90,12 @@ QPushButton:checked {
 
 QComboBox {
     padding: 3px 6px;
-    border: 1px solid #c0c0c0;
+    border: 1px solid #a0a0a0;
     border-radius: 3px;
 }
 
 QSplitter::handle {
-    background: #e0e0e0;
+    background: #b8b8b8;
 }
 QSplitter::handle:horizontal {
     width: 3px;
@@ -105,7 +106,7 @@ QSplitter::handle:vertical {
 
 QStatusBar {
     font-size: 11px;
-    color: #666;
+    color: #555;
 }
 
 QDockWidget {
@@ -113,7 +114,7 @@ QDockWidget {
 }
 QDockWidget::title {
     padding: 4px;
-    background: #f0f0f0;
+    background: #c8c8c8;
 }
 """
 
