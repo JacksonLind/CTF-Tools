@@ -22,42 +22,61 @@ _STYLESHEET = """
 /* ── Global clean-up ──────────────────────────────────────────── */
 QMainWindow, QWidget {
     font-size: 13px;
-    background-color: #d6d6d6;
+    background-color: #2b2b2b;
+    color: #ffffff;
 }
 
 QToolBar {
     spacing: 4px;
     padding: 2px 4px;
+    background-color: #2b2b2b;
+    border: none;
 }
 QToolBar QLabel {
     padding: 0 2px;
+    color: #ffffff;
 }
 
 QTabWidget::pane {
-    border: 1px solid #a0a0a0;
+    border: 1px solid #555555;
     border-radius: 3px;
 }
 QTabBar::tab {
     padding: 5px 12px;
     margin-right: 2px;
+    background-color: #3a3a3a;
+    color: #ffffff;
+    border: 1px solid #555555;
+    border-bottom: none;
+    border-radius: 3px 3px 0 0;
 }
 QTabBar::tab:selected {
     font-weight: bold;
+    background-color: #2b2b2b;
+}
+QTabBar::tab:hover:!selected {
+    background-color: #444444;
 }
 
 QTreeWidget {
-    alternate-background-color: #cacaca;
+    background-color: #2b2b2b;
+    alternate-background-color: #323232;
+    color: #ffffff;
 }
 QTreeWidget::item {
     padding: 2px 0;
 }
+QTreeWidget::item:selected {
+    background-color: #1e4a7a;
+}
 
 QGroupBox {
     font-weight: bold;
-    border: 1px solid #b0b0b0;
+    border: 1px solid #555555;
     border-radius: 4px;
     margin-top: 8px;
     padding-top: 14px;
+    color: #ffffff;
 }
 QGroupBox::title {
     subcontrol-origin: margin;
@@ -65,37 +84,78 @@ QGroupBox::title {
     padding: 0 4px;
 }
 
-QTextEdit[readOnly="true"] {
-    background-color: #dcdcdc;
-    border: 1px solid #b8b8b8;
+QTextEdit {
+    background-color: #353535;
+    color: #ffffff;
+    border: 1px solid #555555;
     border-radius: 3px;
+}
+QTextEdit[readOnly="true"] {
+    background-color: #323232;
+    border: 1px solid #555555;
+    border-radius: 3px;
+}
+
+QLineEdit {
+    background-color: #353535;
+    color: #ffffff;
+    border: 1px solid #555555;
+    border-radius: 3px;
+    padding: 2px 4px;
 }
 
 QPushButton {
     padding: 4px 10px;
-    border: 1px solid #a0a0a0;
+    border: 1px solid #555555;
     border-radius: 3px;
-    background: #cfcfcf;
+    background: #3d3d3d;
+    color: #ffffff;
 }
 QPushButton:hover {
-    background: #c0c0c0;
+    background: #4a4a4a;
 }
 QPushButton:pressed {
-    background: #b0b0b0;
+    background: #252525;
 }
 QPushButton:checked {
-    background: #ddeeff;
-    border-color: #88b0dd;
+    background: #1e4a7a;
+    border-color: #5588bb;
 }
 
 QComboBox {
     padding: 3px 6px;
-    border: 1px solid #a0a0a0;
+    border: 1px solid #555555;
     border-radius: 3px;
+    background-color: #3d3d3d;
+    color: #ffffff;
+}
+QComboBox QAbstractItemView {
+    background-color: #3d3d3d;
+    color: #ffffff;
+    selection-background-color: #1e4a7a;
+}
+
+QScrollBar:vertical {
+    background: #2b2b2b;
+    width: 12px;
+}
+QScrollBar::handle:vertical {
+    background: #555555;
+    border-radius: 4px;
+    min-height: 20px;
+}
+QScrollBar:horizontal {
+    background: #2b2b2b;
+    height: 12px;
+}
+QScrollBar::handle:horizontal {
+    background: #555555;
+    border-radius: 4px;
+    min-width: 20px;
 }
 
 QSplitter::handle {
-    background: #b8b8b8;
+    background: #555555;
 }
 QSplitter::handle:horizontal {
     width: 3px;
@@ -106,15 +166,60 @@ QSplitter::handle:vertical {
 
 QStatusBar {
     font-size: 11px;
-    color: #555;
+    color: #cccccc;
+    background-color: #222222;
 }
 
 QDockWidget {
     font-weight: bold;
+    color: #ffffff;
 }
 QDockWidget::title {
     padding: 4px;
-    background: #c8c8c8;
+    background: #3a3a3a;
+    color: #ffffff;
+}
+
+QMenuBar {
+    background-color: #2b2b2b;
+    color: #ffffff;
+}
+QMenuBar::item:selected {
+    background-color: #3a3a3a;
+}
+QMenu {
+    background-color: #2b2b2b;
+    color: #ffffff;
+    border: 1px solid #555555;
+}
+QMenu::item:selected {
+    background-color: #1e4a7a;
+}
+
+QHeaderView::section {
+    background-color: #3a3a3a;
+    color: #ffffff;
+    border: 1px solid #555555;
+    padding: 4px;
+}
+
+QLabel {
+    color: #ffffff;
+}
+
+QCheckBox {
+    color: #ffffff;
+}
+
+QRadioButton {
+    color: #ffffff;
+}
+
+QSpinBox, QDoubleSpinBox {
+    background-color: #353535;
+    color: #ffffff;
+    border: 1px solid #555555;
+    border-radius: 3px;
 }
 """
 
