@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from .report import Finding, Session
+from .challenge_fingerprinter import ChallengeFingerprinter
 
 logger = logging.getLogger(__name__)
 
@@ -862,6 +863,7 @@ class HypothesisEngine:
 
     def __init__(self, ai_client=None) -> None:
         self._ai_client = ai_client
+        self._fingerprinter = ChallengeFingerprinter()
 
     def run(self, session: Session) -> List[Hypothesis]:
         """Return an ordered list of Hypothesis objects (highest confidence first)."""
@@ -876,6 +878,9 @@ class HypothesisEngine:
         if self._ai_client and self._ai_client.available:
             ai_hyps = self._ai_augmented(findings, session)
             hypotheses.extend(ai_hyps)
+
+        # Fingerprint path (always runs; appended as FINGERPRINT category)
+        hypotheses.extend(self._fingerprint(findings))
 
         # Sort by confidence descending
         hypotheses.sort(key=lambda h: -h.confidence)
@@ -1004,4 +1009,41 @@ class HypothesisEngine:
                 reasoning=reasoning,
             )
         ]
+        return results
+
+    # ------------------------------------------------------------------
+
+    def _fingerprint(self, findings: List[Finding]) -> List[Hypothesis]:
+        """Run the challenge fingerprinter and return top-3 matches as FINGERPRINT hypotheses."""
+        matches = self._fingerprinter.match(findings, top_n=3)
+        results: List[Hypothesis] = []
+        for match in matches:
+            archetype = match["archetype"]
+            score = match["score"]
+            pct = match["confidence_pct"]
+            name = archetype.get("name", "Unknown")
+            source = archetype.get("source", "")
+            description = archetype.get("description", "")
+            transforms = archetype.get("typical_transforms", [])
+            category = archetype.get("category", "unknown")
+            solve_hint = archetype.get("solve_rate_hint", "")
+
+            reasoning_parts = [description]
+            if source:
+                reasoning_parts.append(f"Source: {source}")
+            if solve_hint:
+                reasoning_parts.append(f"Typical solve rate: {solve_hint}")
+            reasoning_parts.append(f"Fingerprint confidence: {pct}%")
+
+            results.append(Hypothesis(
+                title=f"Fingerprint: {name}",
+                confidence=score,
+                category="fingerprint",
+                present_findings=[],
+                missing_findings=[],
+                suggested_commands=[],
+                suggested_transforms=transforms,
+                source="fingerprint",
+                reasoning="\n".join(reasoning_parts),
+            ))
         return results
