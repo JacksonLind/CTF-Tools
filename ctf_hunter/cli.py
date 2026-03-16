@@ -90,10 +90,11 @@ def _format_csv(findings: List[Finding]) -> str:
     writer.writerow(["ID", "File", "Analyzer", "Title", "Severity",
                       "Offset", "Confidence", "FlagMatch", "Detail"])
     for f in findings:
+        detail = f.detail[:500] + "…" if len(f.detail) > 500 else f.detail
         writer.writerow([
             f.id, f.file, f.analyzer, f.title, f.severity,
             hex(f.offset) if f.offset >= 0 else "",
-            f"{f.confidence:.2f}", str(f.flag_match), f.detail[:500],
+            f"{f.confidence:.2f}", str(f.flag_match), detail,
         ])
     return buf.getvalue()
 
@@ -113,12 +114,13 @@ def _format_html(findings: List[Finding]) -> str:
                 continue
             color = sev_color.get(f.severity, "#333")
             flag_icon = "🚩 " if f.flag_match else ""
+            detail_text = f.detail[:500] + "…" if len(f.detail) > 500 else f.detail
             rows.append(
                 f'<div style="border-left:4px solid {color};padding:8px;margin:8px 0;">'
                 f'<b style="color:{color}">[{f.severity}]</b> {flag_icon}'
                 f'<b>{html.escape(f.title)}</b> '
                 f'<span style="color:#888">(conf: {f.confidence:.2f}, analyzer: {f.analyzer})</span>'
-                f'<br><code>{html.escape(f.detail[:500])}</code>'
+                f'<br><code>{html.escape(detail_text)}</code>'
                 f'</div>'
             )
     body = "\n".join(rows)
@@ -179,7 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--flag", "-f",
         default=r"CTF\{[^}]+\}",
-        help="Flag regex pattern (default: CTF\\{[^}]+\\})",
+        help=r"Flag regex pattern (default: CTF\{[^}]+\})",
     )
     parser.add_argument(
         "--format", "-F",
