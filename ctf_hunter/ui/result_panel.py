@@ -9,7 +9,7 @@ from typing import List, Callable, Optional
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
     QPushButton, QLabel, QTextEdit, QMenu, QApplication, QInputDialog,
-    QToolBar,
+    QToolBar, QTabWidget,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont, QColor, QAction
@@ -59,7 +59,8 @@ class ResultPanel(QWidget):
         self._visible_states: set[str] = set(TRIAGE_STATES)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
 
         # Header row
         hdr = QHBoxLayout()
@@ -75,19 +76,24 @@ class ResultPanel(QWidget):
         hdr.addWidget(self._ai_btn)
         layout.addLayout(hdr)
 
-        # Triage filter toolbar
+        # Triage filter toolbar — compact single-row toggle buttons
         filter_bar = QHBoxLayout()
-        filter_bar.addWidget(QLabel("Triage filter:"))
+        filter_bar.setSpacing(2)
         self._triage_btns: dict[str, QPushButton] = {}
         for state in TRIAGE_STATES:
             btn = QPushButton(_TRIAGE_LABELS[state])
             btn.setCheckable(True)
             btn.setChecked(True)
             btn.setFixedHeight(22)
+            btn.setStyleSheet("font-size: 11px; padding: 1px 4px;")
             btn.clicked.connect(lambda checked, s=state: self._on_triage_filter(s, checked))
             self._triage_btns[state] = btn
             filter_bar.addWidget(btn)
         filter_bar.addStretch()
+        # Triage summary label (inline with filter)
+        self._triage_summary = QLabel("")
+        self._triage_summary.setStyleSheet("font-size: 11px; color: #555;")
+        filter_bar.addWidget(self._triage_summary)
         layout.addLayout(filter_bar)
 
         # Findings tree with context menu
@@ -99,34 +105,33 @@ class ResultPanel(QWidget):
         self._tree.setColumnWidth(3, 70)
         self._tree.setColumnWidth(4, 70)
         self._tree.setColumnWidth(5, 110)
+        self._tree.setAlternatingRowColors(True)
         self._tree.itemSelectionChanged.connect(self._on_selection)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._finding_context_menu)
-        layout.addWidget(self._tree)
+        layout.addWidget(self._tree, 1)
 
-        # Triage summary status bar
-        self._triage_summary = QLabel("")
-        self._triage_summary.setStyleSheet("font-size: 11px; color: #555; padding: 2px 4px;")
-        layout.addWidget(self._triage_summary)
+        # Detail area: tabbed widget for Detail / AI Output / Suggested Tools
+        self._detail_tabs = QTabWidget()
+        self._detail_tabs.setMaximumHeight(200)
 
-        # Detail box
+        # Detail tab
         self._detail = QTextEdit()
         self._detail.setReadOnly(True)
-        self._detail.setMaximumHeight(140)
         self._detail.setPlaceholderText("Select a finding to see details…")
-        layout.addWidget(self._detail)
+        self._detail_tabs.addTab(self._detail, "Details")
 
-        # AI output
+        # AI output tab
         self._ai_output = QTextEdit()
         self._ai_output.setReadOnly(True)
-        self._ai_output.setMaximumHeight(150)
         self._ai_output.setPlaceholderText("AI analysis output will appear here…")
-        layout.addWidget(self._ai_output)
+        self._detail_tabs.addTab(self._ai_output, "🤖 AI")
 
-        # Suggested Tools panel
+        # Suggested Tools tab
         self._tool_suggester = SuggestedToolsPanel()
-        self._tool_suggester.setMaximumHeight(200)
-        layout.addWidget(self._tool_suggester)
+        self._detail_tabs.addTab(self._tool_suggester, "🛠 Tools")
+
+        layout.addWidget(self._detail_tabs)
 
     def set_ai_client(self, ai_client) -> None:
         self._ai_client = ai_client
@@ -328,6 +333,7 @@ class ResultPanel(QWidget):
                 pass
 
         self._ai_output.setPlainText("Querying AI… please wait.")
+        self._detail_tabs.setCurrentWidget(self._ai_output)
         response = self._ai_client.analyze_findings(self._current_file, summary, hex_ctx)
         self._ai_output.setPlainText(response or "No response from AI.")
 

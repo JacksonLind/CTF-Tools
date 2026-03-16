@@ -156,7 +156,7 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
 
         # Fast / Deep / Auto toggle
-        tb.addWidget(QLabel("Mode: "))
+        tb.addWidget(QLabel(" Mode:"))
         self._depth_combo = QComboBox()
         self._depth_combo.addItems(["Fast", "Deep", "Auto"])
         self._depth_combo.setToolTip(
@@ -166,10 +166,8 @@ class MainWindow(QMainWindow):
         )
         tb.addWidget(self._depth_combo)
 
-        tb.addSeparator()
-
         # Flag format selector
-        tb.addWidget(QLabel("Flag: "))
+        tb.addWidget(QLabel(" Flag:"))
         self._flag_combo = QComboBox()
         self._flag_combo.addItems(list(_FLAG_PRESETS.keys()))
         self._flag_combo.currentTextChanged.connect(self._on_flag_preset_changed)
@@ -177,39 +175,14 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        # Tool status dots
-        self._tool_dots: dict[str, QLabel] = {}
-        for tool in ("exiftool", "binwalk", "strings", "file", "tshark"):
-            dot = QLabel(f"● {tool}")
-            dot.setFont(QFont("", 9))
-            self._tool_dots[tool] = dot
-            tb.addWidget(dot)
-
-        tb.addSeparator()
-
-        # Save / Load Session
-        act_save = QAction("💾 Save Session", self)
-        act_save.triggered.connect(self._save_session)
-        tb.addAction(act_save)
-
-        act_load = QAction("📂 Load Session", self)
-        act_load.triggered.connect(self._load_session)
-        tb.addAction(act_load)
-
-        act_compare = QAction("🔀 Compare Session", self)
-        act_compare.setToolTip("Compare current session with another .ctfs file")
-        act_compare.triggered.connect(self._compare_session)
-        tb.addAction(act_compare)
-
-        tb.addSeparator()
-
-        # Watchfolder toggle
-        self._watchfolder_btn = QPushButton("📁 Watchfolder OFF")
-        self._watchfolder_btn.setCheckable(True)
-        self._watchfolder_btn.toggled.connect(self._toggle_watchfolder)
-        tb.addWidget(self._watchfolder_btn)
-
-        tb.addSeparator()
+        # Session actions grouped into a single dropdown menu button
+        session_btn = QPushButton("💾 Session")
+        session_menu = QMenu(session_btn)
+        session_menu.addAction("💾 Save Session", self._save_session)
+        session_menu.addAction("📂 Load Session", self._load_session)
+        session_menu.addAction("🔀 Compare Session…", self._compare_session)
+        session_btn.setMenu(session_menu)
+        tb.addWidget(session_btn)
 
         # Export
         export_btn = QPushButton("📤 Export")
@@ -222,19 +195,45 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
+        # Watchfolder toggle
+        self._watchfolder_btn = QPushButton("📁 Watch")
+        self._watchfolder_btn.setCheckable(True)
+        self._watchfolder_btn.setToolTip("Monitor a folder for new files")
+        self._watchfolder_btn.toggled.connect(self._toggle_watchfolder)
+        tb.addWidget(self._watchfolder_btn)
+
+        # Dynamic Analysis (Frida) — moved from main tab body to toolbar
+        self._frida_btn = QPushButton("🔬 Dynamic")
+        self._frida_btn.setToolTip(
+            "Run Frida-based runtime instrumentation on the selected binary.\n"
+            "Requires frida (pip install frida frida-tools)."
+        )
+        self._frida_btn.clicked.connect(self._run_dynamic_analysis)
+        tb.addWidget(self._frida_btn)
+
+        tb.addSeparator()
+
         # Settings
         act_settings = QAction("⚙ Settings", self)
         act_settings.triggered.connect(self._open_settings)
         tb.addAction(act_settings)
 
-        tb.addSeparator()
-
-        # Transform Pipeline toggle
-        self._pipeline_toggle_action = QAction("🔧 Transform Pipeline", self)
+        # Transform Pipeline toggle — kept as a toolbar action for quick access
+        self._pipeline_toggle_action = QAction("🔧 Pipeline", self)
         self._pipeline_toggle_action.setCheckable(True)
         self._pipeline_toggle_action.setChecked(True)
+        self._pipeline_toggle_action.setToolTip("Toggle Transform Pipeline panel")
         self._pipeline_toggle_action.triggered.connect(self._toggle_transform_pipeline)
         tb.addAction(self._pipeline_toggle_action)
+
+        # Tool status dots — shown in status bar instead of toolbar
+        self._tool_dots: dict[str, QLabel] = {}
+        status_bar = self.statusBar()
+        for tool in ("exiftool", "binwalk", "strings", "file", "tshark"):
+            dot = QLabel(f"● {tool}")
+            dot.setFont(QFont("", 9))
+            self._tool_dots[tool] = dot
+            status_bar.addPermanentWidget(dot)
 
     # ------------------------------------------------------------------
     # Central widget
@@ -246,7 +245,8 @@ class MainWindow(QMainWindow):
         # --- Tab 1: Main ---
         main_tab = QWidget()
         main_layout = QVBoxLayout(main_tab)
-        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setContentsMargins(4, 4, 4, 4)
+        main_layout.setSpacing(0)
 
         splitter_h = QSplitter(Qt.Orientation.Horizontal)
 
@@ -254,9 +254,11 @@ class MainWindow(QMainWindow):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(4, 4, 4, 4)
+        left_layout.setSpacing(4)
 
         left_hdr = QHBoxLayout()
-        left_hdr.addWidget(QLabel("Files"))
+        left_hdr.addWidget(QLabel("<b>Files</b>"))
+        left_hdr.addStretch()
         add_btn = QPushButton("+")
         add_btn.setFixedWidth(28)
         add_btn.setToolTip("Add files")
@@ -278,23 +280,28 @@ class MainWindow(QMainWindow):
         self._file_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._file_list.customContextMenuRequested.connect(self._file_context_menu)
         self._file_list.currentItemChanged.connect(self._on_file_selected)
-        left_layout.addWidget(self._file_list)
+        left_layout.addWidget(self._file_list, 1)
 
         # Correlate All button
-        correlate_btn = QPushButton("🔗 Correlate All Files")
+        correlate_btn = QPushButton("🔗 Correlate All")
         correlate_btn.setToolTip("Cross-correlate findings across all loaded files")
         correlate_btn.clicked.connect(self._correlate_all_files)
         left_layout.addWidget(correlate_btn)
 
-        # Notes field
-        left_layout.addWidget(QLabel("Notes (for selected file):"))
+        # Notes field — collapsible
+        self._notes_toggle = QPushButton("▶ Notes")
+        self._notes_toggle.setFlat(True)
+        self._notes_toggle.setStyleSheet("text-align: left; font-weight: bold; padding: 2px;")
+        self._notes_toggle.clicked.connect(self._toggle_notes)
+        left_layout.addWidget(self._notes_toggle)
         self._notes_edit = QTextEdit()
         self._notes_edit.setMaximumHeight(90)
         self._notes_edit.setPlaceholderText("Per-file notes…")
         self._notes_edit.textChanged.connect(self._on_notes_changed)
+        self._notes_edit.hide()
         left_layout.addWidget(self._notes_edit)
 
-        left.setMinimumWidth(230)
+        left.setMinimumWidth(200)
         splitter_h.addWidget(left)
 
         # Right panels
@@ -311,50 +318,40 @@ class MainWindow(QMainWindow):
 
         splitter_v.setSizes([500, 300])
         splitter_h.addWidget(splitter_v)
-        splitter_h.setSizes([250, 950])
+        splitter_h.setSizes([220, 980])
 
         main_layout.addWidget(splitter_h)
-
-        # "Run Dynamic Analysis" button — explicit opt-in only, never auto-run
-        self._frida_btn = QPushButton("🔬 Run Dynamic Analysis (Frida)")
-        self._frida_btn.setToolTip(
-            "Run Frida-based runtime instrumentation on the selected binary.\n"
-            "Requires frida to be installed (pip install frida frida-tools).\n"
-            "Only works on ELF and PE files."
-        )
-        self._frida_btn.clicked.connect(self._run_dynamic_analysis)
-        main_layout.addWidget(self._frida_btn)
 
         tabs.addTab(main_tab, "📋 Analysis")
 
         # --- Tab 2: Flag Summary ---
         self._flag_summary = FlagSummaryTab(ai_client=self._ai_client)
-        tabs.addTab(self._flag_summary, "🚩 Flag Summary")
+        tabs.addTab(self._flag_summary, "🚩 Flags")
 
         # --- Tab 3: Steg Viewer ---
         self._steg_viewer = StegViewerTab()
-        tabs.addTab(self._steg_viewer, "🔬 Steg Viewer")
+        tabs.addTab(self._steg_viewer, "🔬 Steg")
 
         # --- Tab 4: File Intel ---
         self._file_intel = FileIntelTab()
-        tabs.addTab(self._file_intel, "🔑 File Intel")
+        tabs.addTab(self._file_intel, "🔑 Intel")
 
         # --- Tab 5: Challenge ---
         self._challenge_panel = ChallengePanelTab(ai_client=self._ai_client)
         tabs.addTab(self._challenge_panel, "🎯 Challenge")
 
-        # --- Tab 6: Timeline ---
-        self._timeline_tab = TimelineTab()
-        tabs.addTab(self._timeline_tab, "🕒 Timeline")
-
-        # --- Tab 7: Network ---
+        # --- Tab 6: Network ---
         self._network_console = NetworkConsoleTab(session=self._session)
         self._network_console.flag_detected.connect(self._on_network_flag_detected)
         tabs.addTab(self._network_console, "🌐 Network")
 
-        # --- Tab 8: Attack Plan ---
+        # --- Tab 7: Attack Plan ---
         self._attack_plan = AttackPlanTab(ai_client=self._ai_client)
-        tabs.addTab(self._attack_plan, "⚔️ Attack Plan")
+        tabs.addTab(self._attack_plan, "⚔️ Attack")
+
+        # --- Tab 8: Timeline ---
+        self._timeline_tab = TimelineTab()
+        tabs.addTab(self._timeline_tab, "🕒 Timeline")
 
         # --- Tab 9: Help ---
         self._help_tab = HelpTab()
@@ -502,6 +499,11 @@ class MainWindow(QMainWindow):
         if item:
             path = item.data(Qt.ItemDataRole.UserRole)
             self._notes_by_file[path] = self._notes_edit.toPlainText()
+
+    def _toggle_notes(self) -> None:
+        visible = not self._notes_edit.isVisible()
+        self._notes_edit.setVisible(visible)
+        self._notes_toggle.setText("▼ Notes" if visible else "▶ Notes")
 
     # ------------------------------------------------------------------
     # Analysis
@@ -801,12 +803,12 @@ class MainWindow(QMainWindow):
             cfg = load_config()
             self._watchfolder.max_file_mb = float(cfg.get("max_file_mb", 50))
             self._watchfolder.start(directory)
-            self._watchfolder_btn.setText("📁 Watchfolder ON ●")
+            self._watchfolder_btn.setText("📁 Watch ●")
             self._watchfolder_btn.setStyleSheet("color: green;")
             self._watchfolder_active = True
         else:
             self._watchfolder.stop()
-            self._watchfolder_btn.setText("📁 Watchfolder OFF")
+            self._watchfolder_btn.setText("📁 Watch")
             self._watchfolder_btn.setStyleSheet("")
             self._watchfolder_active = False
 

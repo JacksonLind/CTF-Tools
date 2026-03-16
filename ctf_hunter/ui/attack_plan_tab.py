@@ -327,12 +327,12 @@ class AttackPlanTab(QWidget):
         self._exploit_gen = ExploitGenerator()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
 
         # ── Toolbar ──────────────────────────────────────────────────────
         toolbar = QHBoxLayout()
-        toolbar.addWidget(QLabel("⚔️  Attack Hypotheses — ordered by confidence:"))
+        toolbar.addWidget(QLabel("<b>⚔️ Attack Hypotheses</b> — ordered by confidence"))
         toolbar.addStretch()
 
         refresh_btn = QPushButton("🔄 Refresh")
