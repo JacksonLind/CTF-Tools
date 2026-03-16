@@ -153,7 +153,9 @@ class ContentClassifier:
         data: bytes = content.data
 
         # ------------------------------------------------------------------ #
-        # 0. Flag pattern – always checked first, result carried through       #
+        # 0. Flag pattern – always checked first; when found, the match is     #
+        #    preserved but classification continues through all remaining       #
+        #    detection paths to determine proper MIME type and analyzers.       #
         # ------------------------------------------------------------------ #
         flag_match = _check_flag(data)
 

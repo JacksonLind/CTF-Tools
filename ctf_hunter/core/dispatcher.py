@@ -135,7 +135,8 @@ def dispatch(
     Modes:
       fast  – Quick targeted checks.
       deep  – Exhaustive checks.
-      auto  – Run fast first; then run all analyzers in deep mode.
+      auto  – Run all analyzers in fast mode first, then run all analyzers
+              again in deep mode.
     """
     if depth == "auto":
         return _dispatch_auto(path, flag_pattern, ai_client)
