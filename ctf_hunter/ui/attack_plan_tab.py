@@ -45,17 +45,18 @@ from core.report import Session
 # ---------------------------------------------------------------------------
 
 _CATEGORY_COLOURS: dict[str, tuple[str, str]] = {
-    "pwn":       ("#cc0000", "#fff0f0"),
-    "rev":       ("#8800cc", "#f5f0ff"),
-    "crypto":    ("#0055cc", "#f0f5ff"),
-    "steg":      ("#006633", "#f0fff5"),
-    "forensics": ("#886600", "#fffbf0"),
-    "web":       ("#005577", "#f0faff"),
-    "network":   ("#005577", "#f0faff"),
-    "archive":   ("#664400", "#fff8f0"),
-    "document":  ("#444444", "#f8f8f8"),
-    "encoding":  ("#224488", "#f0f4ff"),
-    "ai":        ("#550077", "#fdf0ff"),
+    "pwn":         ("#cc0000", "#fff0f0"),
+    "rev":         ("#8800cc", "#f5f0ff"),
+    "crypto":      ("#0055cc", "#f0f5ff"),
+    "steg":        ("#006633", "#f0fff5"),
+    "forensics":   ("#886600", "#fffbf0"),
+    "web":         ("#005577", "#f0faff"),
+    "network":     ("#005577", "#f0faff"),
+    "archive":     ("#664400", "#fff8f0"),
+    "document":    ("#444444", "#f8f8f8"),
+    "encoding":    ("#224488", "#f0f4ff"),
+    "ai":          ("#550077", "#fdf0ff"),
+    "fingerprint": ("#1a6644", "#f0fff8"),
 }
 
 _DEFAULT_COLOURS = ("#333333", "#f8f8f8")
@@ -312,6 +313,84 @@ class _HypothesisCard(QFrame):
 
 
 # ---------------------------------------------------------------------------
+# Fingerprint banner widget
+# ---------------------------------------------------------------------------
+
+class _FingerprintBanner(QFrame):
+    """Compact banner showing the top challenge fingerprint match."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet(
+            "QFrame { background:#0d3d26; border:1px solid #1a6644; border-radius:6px; }"
+        )
+        self.setVisible(False)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10, 6, 10, 6)
+        row.setSpacing(12)
+
+        self._icon_lbl = QLabel("🔍")
+        self._icon_lbl.setStyleSheet("font-size:18px; background:transparent; border:none;")
+        row.addWidget(self._icon_lbl)
+
+        info = QVBoxLayout()
+        info.setSpacing(1)
+
+        self._title_lbl = QLabel()
+        self._title_lbl.setStyleSheet(
+            "font-weight:bold; font-size:13px; color:#44ee88; background:transparent; border:none;"
+        )
+        info.addWidget(self._title_lbl)
+
+        self._detail_lbl = QLabel()
+        self._detail_lbl.setWordWrap(True)
+        self._detail_lbl.setStyleSheet(
+            "color:#aaddcc; font-size:11px; background:transparent; border:none;"
+        )
+        info.addWidget(self._detail_lbl)
+
+        row.addLayout(info, 1)
+
+        self._conf_lbl = QLabel()
+        self._conf_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._conf_lbl.setStyleSheet(
+            "font-size:22px; font-weight:bold; color:#44ee88; background:transparent; border:none;"
+        )
+        row.addWidget(self._conf_lbl)
+
+    def update_match(self, hyp: "Hypothesis") -> None:
+        """Populate the banner from the top fingerprint Hypothesis."""
+        # Extract archetype name from title like "Fingerprint: Basic Stack Overflow"
+        prefix = "Fingerprint: "
+        name = hyp.title[len(prefix):] if hyp.title.startswith(prefix) else hyp.title
+        pct = round(hyp.confidence * 100, 1)
+
+        # Parse source from reasoning (line starting with "Source:")
+        source_line = ""
+        for line in hyp.reasoning.splitlines():
+            if line.startswith("Source:"):
+                source_line = line[7:].strip()
+                break
+        source_str = f"  ·  {source_line}" if source_line else ""
+
+        self._title_lbl.setText(f"🔍 Fingerprint Match: {name}{source_str}")
+
+        # First line of reasoning is the description
+        desc = hyp.reasoning.splitlines()[0] if hyp.reasoning else ""
+        transforms_preview = ""
+        if hyp.suggested_transforms:
+            transforms_preview = "  →  " + "  →  ".join(hyp.suggested_transforms[:3])
+        self._detail_lbl.setText(f"{desc}{transforms_preview}")
+        self._conf_lbl.setText(f"{pct}%")
+        self.setVisible(True)
+
+    def clear(self) -> None:
+        self.setVisible(False)
+
+
+# ---------------------------------------------------------------------------
 # Attack Plan tab
 # ---------------------------------------------------------------------------
 
@@ -341,6 +420,10 @@ class AttackPlanTab(QWidget):
         toolbar.addWidget(refresh_btn)
 
         layout.addLayout(toolbar)
+
+        # ── Fingerprint banner ────────────────────────────────────────────
+        self._fp_banner = _FingerprintBanner()
+        layout.addWidget(self._fp_banner)
 
         # ── Scroll area for hypothesis cards ─────────────────────────────
         self._scroll = QScrollArea()
@@ -387,10 +470,18 @@ class AttackPlanTab(QWidget):
                 item.widget().deleteLater()
 
         if not self._hypotheses:
+            self._fp_banner.clear()
             self._status_lbl.setText(
                 "No hypotheses matched — load and analyse a challenge file first."
             )
             return
+
+        # Update fingerprint banner with top fingerprint hypothesis
+        fp_hyps = [h for h in self._hypotheses if h.source == "fingerprint"]
+        if fp_hyps:
+            self._fp_banner.update_match(fp_hyps[0])
+        else:
+            self._fp_banner.clear()
 
         self._status_lbl.setText(
             f"{len(self._hypotheses)} hypothesis(es) generated — "

@@ -20,6 +20,7 @@ import csv
 import html
 import io
 import json
+import logging
 import os
 import re
 import sys
@@ -27,7 +28,10 @@ from pathlib import Path
 from typing import List
 
 from core.dispatcher import dispatch
-from core.report import Finding
+from core.report import Finding, Session
+from core.challenge_fingerprinter import ChallengeFingerprinter
+
+logger = logging.getLogger(__name__)
 
 # Path for persisting the most-recent CLI run's findings so --feedback can look them up.
 _LAST_RUN_PATH = Path.home() / ".ctf_hunter" / "last_run.json"
@@ -60,6 +64,41 @@ def _format_text(findings: List[Finding]) -> str:
                 lines.append(f"    Detail:   {detail}")
             lines.append("")
     return "\n".join(lines) + "\n"
+
+
+def _fingerprint_text_section(matches: list) -> str:
+    """Format fingerprint matches as a plain-text section."""
+    if not matches:
+        return ""
+    lines = [
+        "",
+        "=" * 72,
+        "Fingerprint Matches (challenge archetype similarity)",
+        "=" * 72,
+    ]
+    for rank, m in enumerate(matches, 1):
+        arch = m["archetype"]
+        pct = m["confidence_pct"]
+        name = arch.get("name", "Unknown")
+        source = arch.get("source", "")
+        category = arch.get("category", "")
+        description = arch.get("description", "")
+        transforms = arch.get("typical_transforms", [])
+        solve_hint = arch.get("solve_rate_hint", "")
+        lines.append(
+            f"  #{rank}  [{pct}%] {name}  (category: {category}"
+            + (f", source: {source}" if source else "") + ")"
+        )
+        if description:
+            lines.append(f"         {description}")
+        if solve_hint:
+            lines.append(f"         Typical solve rate: {solve_hint}")
+        if transforms:
+            lines.append("         Suggested transforms:")
+            for t in transforms[:4]:
+                lines.append(f"           • {t}")
+        lines.append("")
+    return "\n".join(lines)
 
 
 def _format_json(findings: List[Finding]) -> str:
@@ -430,9 +469,43 @@ def run_cli(argv: list[str] | None = None) -> int:
         key=lambda f: (not f.flag_match, -f.confidence, _SEVERITY_ORDER.get(f.severity, 3)),
     )
 
+    # Run challenge fingerprinter on all (unfiltered-by-user) findings
+    try:
+        _fp = ChallengeFingerprinter()
+        # Use all collected findings (before user filters) for better signal
+        _fp_session_findings = [f for f in all_findings if not f.duplicate_of]
+        fingerprint_matches = _fp.match(_fp_session_findings, top_n=3)
+    except Exception as exc:
+        logger.warning("Fingerprinting failed: %s", exc)
+        fingerprint_matches = []
+
     # Format output
     formatter = _FORMATTERS[args.format]
-    output = formatter(all_findings)
+    if args.format == "json":
+        # JSON output: dict with "findings" array and "fingerprint" array
+        findings_list = [f.to_dict() for f in all_findings if not f.duplicate_of]
+        fingerprint_list = [
+            {
+                "rank": i + 1,
+                "name": m["archetype"].get("name", ""),
+                "category": m["archetype"].get("category", ""),
+                "source": m["archetype"].get("source", ""),
+                "confidence_pct": m["confidence_pct"],
+                "score": m["score"],
+                "description": m["archetype"].get("description", ""),
+                "typical_transforms": m["archetype"].get("typical_transforms", []),
+                "solve_rate_hint": m["archetype"].get("solve_rate_hint", ""),
+            }
+            for i, m in enumerate(fingerprint_matches)
+        ]
+        output = json.dumps(
+            {"findings": findings_list, "fingerprint": fingerprint_list},
+            indent=2,
+        )
+    elif args.format == "text":
+        output = formatter(all_findings) + _fingerprint_text_section(fingerprint_matches)
+    else:
+        output = formatter(all_findings)
 
     # Write output
     if args.output:
@@ -452,5 +525,12 @@ def run_cli(argv: list[str] | None = None) -> int:
             f"{flag_count} flag(s), {high_count} HIGH severity",
             file=sys.stderr,
         )
+        if fingerprint_matches:
+            top = fingerprint_matches[0]
+            print(
+                f"Top fingerprint: {top['archetype'].get('name', '?')} "
+                f"({top['confidence_pct']}%)",
+                file=sys.stderr,
+            )
 
     return 0
