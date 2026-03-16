@@ -7,7 +7,7 @@ from typing import List
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
-    QPushButton, QLabel, QTextEdit,
+    QPushButton, QLabel, QTextEdit, QTabWidget,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QColor
@@ -22,6 +22,8 @@ class FlagSummaryTab(QWidget):
         self._findings: List[Finding] = []
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
 
         header_row = QHBoxLayout()
         self._count_label = QLabel("No flag matches found.")
@@ -42,20 +44,25 @@ class FlagSummaryTab(QWidget):
         self._tree.setColumnWidth(2, 220)
         self._tree.setColumnWidth(3, 300)
         self._tree.setColumnWidth(4, 80)
+        self._tree.setAlternatingRowColors(True)
         self._tree.itemSelectionChanged.connect(self._on_selection)
-        layout.addWidget(self._tree)
+        layout.addWidget(self._tree, 1)
+
+        # Detail / AI output in a tabbed widget
+        self._detail_tabs = QTabWidget()
+        self._detail_tabs.setMaximumHeight(200)
 
         self._detail_box = QTextEdit()
         self._detail_box.setReadOnly(True)
-        self._detail_box.setMaximumHeight(150)
         self._detail_box.setPlaceholderText("Select a finding to see full detail...")
-        layout.addWidget(self._detail_box)
+        self._detail_tabs.addTab(self._detail_box, "Details")
 
         self._ai_output = QTextEdit()
         self._ai_output.setReadOnly(True)
-        self._ai_output.setMaximumHeight(180)
         self._ai_output.setPlaceholderText("AI holistic analysis output will appear here...")
-        layout.addWidget(self._ai_output)
+        self._detail_tabs.addTab(self._ai_output, "🤖 AI Analysis")
+
+        layout.addWidget(self._detail_tabs)
 
     def set_ai_client(self, ai_client) -> None:
         self._ai_client = ai_client
@@ -109,5 +116,6 @@ class FlagSummaryTab(QWidget):
             )
         summary = "\n".join(summary_lines[:100])
         self._ai_output.setPlainText("Querying AI… please wait.")
+        self._detail_tabs.setCurrentWidget(self._ai_output)
         response = self._ai_client.holistic_analysis(summary)
         self._ai_output.setPlainText(response or "No response from AI.")
