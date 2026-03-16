@@ -45,6 +45,7 @@ from ui.network_console import NetworkConsoleTab
 from ui.timeline_tab import TimelineTab
 from ui.transform_pipeline import make_transform_pipeline_dock, TransformPipelinePanel
 from ui.attack_plan_tab import AttackPlanTab
+from ui.attack_chains_tab import AttackChainsTab
 from ui.help_tab import HelpTab
 
 # ---------------------------------------------------------------------------
@@ -349,7 +350,12 @@ class MainWindow(QMainWindow):
         self._attack_plan = AttackPlanTab(ai_client=self._ai_client)
         tabs.addTab(self._attack_plan, "⚔️ Attack")
 
-        # --- Tab 8: Timeline ---
+        # --- Tab 8: Attack Chains ---
+        self._attack_chains = AttackChainsTab()
+        self._attack_chains.run_chain_requested.connect(self._on_run_chain)
+        tabs.addTab(self._attack_chains, "⛓️ Chains")
+
+        # --- Tab 9: Timeline ---
         self._timeline_tab = TimelineTab()
         tabs.addTab(self._timeline_tab, "🕒 Timeline")
 
@@ -569,6 +575,7 @@ class MainWindow(QMainWindow):
         self._challenge_panel.update_findings(all_findings)
         self._timeline_tab.refresh(all_findings)
         self._attack_plan.update_session(self._session)
+        self._attack_chains.update_session(self._session)
 
     def _on_analysis_error(self, path: str, msg: str) -> None:
         if pb := self._progress_by_file.get(path):
@@ -592,6 +599,14 @@ class MainWindow(QMainWindow):
         """Load a finding's detail into the Transform Pipeline's first node."""
         panel: TransformPipelinePanel = self._pipeline_dock.widget()
         panel.load_finding(finding.detail)
+        self._pipeline_dock.setVisible(True)
+
+    def _on_run_chain(self, initial_data: str, pipeline_configs: list) -> None:
+        """Load an attack chain into the Transform Pipeline and show it."""
+        panel: TransformPipelinePanel = self._pipeline_dock.widget()
+        panel.load_finding(initial_data)
+        if pipeline_configs:
+            panel.set_pipeline_config(pipeline_configs)
         self._pipeline_dock.setVisible(True)
 
     # ------------------------------------------------------------------
@@ -650,6 +665,7 @@ class MainWindow(QMainWindow):
         self._timeline_tab.refresh(session.findings)
         self._network_console.set_session(session)
         self._attack_plan.update_session(session)
+        self._attack_chains.update_session(session)
 
     def _compare_session(self) -> None:
         """Open a second .ctfs file and show a session diff panel."""
@@ -1070,6 +1086,7 @@ class MainWindow(QMainWindow):
         all_findings = [f for flist in self._findings_by_file.values() for f in flist]
         self._flag_summary.refresh(all_findings)
         self._attack_plan.update_session(self._session)
+        self._attack_chains.update_session(self._session)
         QMessageBox.information(
             self, "Correlate All",
             f"Found {len(new_findings)} cross-file correlation(s)."
