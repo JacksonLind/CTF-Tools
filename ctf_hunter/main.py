@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """
 CTF Hunter — entry point.
-Run: python main.py
+
+GUI mode (default):
+    python main.py
+
+CLI mode (headless):
+    python main.py --cli file.bin
+    python main.py --cli --depth deep --format json challenge.png
+    python main.py --cli --help
 """
 from __future__ import annotations
 
@@ -12,10 +19,6 @@ import os
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
-
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
-from ui.main_window import MainWindow
 
 
 _STYLESHEET = """
@@ -224,7 +227,11 @@ QSpinBox, QDoubleSpinBox {
 """
 
 
-def main() -> None:
+def _run_gui() -> None:
+    """Launch the full PyQt6 GUI."""
+    from PyQt6.QtWidgets import QApplication
+    from ui.main_window import MainWindow
+
     app = QApplication(sys.argv)
     app.setApplicationName("CTF Hunter")
     app.setOrganizationName("CTFTools")
@@ -235,6 +242,17 @@ def main() -> None:
     window.show()
 
     sys.exit(app.exec())
+
+
+def main() -> None:
+    # Detect CLI mode: either explicit --cli flag or piped/redirected output
+    if "--cli" in sys.argv:
+        from cli import run_cli
+        # Strip the --cli flag before passing to argparse
+        argv = [a for a in sys.argv[1:] if a != "--cli"]
+        sys.exit(run_cli(argv))
+    else:
+        _run_gui()
 
 
 if __name__ == "__main__":
