@@ -30,6 +30,8 @@ from typing import List
 from core.dispatcher import dispatch
 from core.report import Finding, Session
 from core.challenge_fingerprinter import ChallengeFingerprinter
+from core.attack_chain import ChainBuilder
+from core.key_registry import KeyRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -479,6 +481,20 @@ def run_cli(argv: list[str] | None = None) -> int:
         logger.warning("Fingerprinting failed: %s", exc)
         fingerprint_matches = []
 
+    # Build attack chains across files
+    attack_chains = []
+    try:
+        if len(targets) >= 2:
+            by_file: dict[str, list[Finding]] = {}
+            for f in all_findings:
+                by_file.setdefault(f.file, []).append(f)
+            workspace = list(by_file.items())
+            key_registry = KeyRegistry()
+            builder = ChainBuilder(workspace, key_registry, flag_pattern)
+            attack_chains = builder.build()
+    except Exception as exc:
+        logger.warning("Attack chain building failed: %s", exc)
+
     # Format output
     formatter = _FORMATTERS[args.format]
     if args.format == "json":
@@ -499,11 +515,21 @@ def run_cli(argv: list[str] | None = None) -> int:
             for i, m in enumerate(fingerprint_matches)
         ]
         output = json.dumps(
-            {"findings": findings_list, "fingerprint": fingerprint_list},
+            {
+                "findings": findings_list,
+                "fingerprint": fingerprint_list,
+                "attack_chains": [
+                    ChainBuilder.chain_to_dict(chain) for chain in attack_chains
+                ],
+            },
             indent=2,
         )
     elif args.format == "text":
-        output = formatter(all_findings) + _fingerprint_text_section(fingerprint_matches)
+        output = (
+            formatter(all_findings)
+            + _fingerprint_text_section(fingerprint_matches)
+            + ChainBuilder.chains_to_text(attack_chains)
+        )
     else:
         output = formatter(all_findings)
 
