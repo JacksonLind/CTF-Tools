@@ -7,7 +7,7 @@ encoding, suggested analyzers, and any immediate flag match.
 
 Detection order
 ---------------
-1. Flag pattern (always checked first)
+1. Flag pattern (always checked first, result carried through all paths)
 2. Magic-byte file-type identification
 3. Text-encoding detection (base64, hex, binary, morse, polybius, tap code,
    baconian, IC-based Caesar/Vigenère, ROT13)
@@ -153,20 +153,11 @@ class ContentClassifier:
         data: bytes = content.data
 
         # ------------------------------------------------------------------ #
-        # 0. Flag pattern – always first                                       #
+        # 0. Flag pattern – always checked first; when found, the match is     #
+        #    preserved but classification continues through all remaining       #
+        #    detection paths to determine proper MIME type and analyzers.       #
         # ------------------------------------------------------------------ #
         flag_match = _check_flag(data)
-        if flag_match:
-            return ClassificationResult(
-                mime_type="text/plain",
-                confidence=0.99,
-                virtual_filename=content.virtual_filename or "flag.txt",
-                suggested_analyzers=["encoding", "classical_cipher"],
-                is_text=True,
-                is_binary=False,
-                encoding_detected="raw",
-                flag_match=flag_match,
-            )
 
         # ------------------------------------------------------------------ #
         # 1. Magic bytes                                                        #
@@ -182,7 +173,7 @@ class ContentClassifier:
                 is_text=is_text,
                 is_binary=not is_text,
                 encoding_detected="raw",
-                flag_match="",
+                flag_match=flag_match,
             )
 
         # ------------------------------------------------------------------ #
@@ -211,7 +202,7 @@ class ContentClassifier:
                 is_text=True,
                 is_binary=False,
                 encoding_detected=encoding,
-                flag_match="",
+                flag_match=flag_match,
             )
 
         # ------------------------------------------------------------------ #
@@ -228,7 +219,7 @@ class ContentClassifier:
                     is_text=False,
                     is_binary=True,
                     encoding_detected="zlib",
-                    flag_match="",
+                    flag_match=flag_match,
                 )
             return ClassificationResult(
                 mime_type="application/octet-stream",
@@ -238,7 +229,7 @@ class ContentClassifier:
                 is_text=False,
                 is_binary=True,
                 encoding_detected="",
-                flag_match="",
+                flag_match=flag_match,
             )
 
         if entropy >= _ENTROPY_MEDIUM_THRESHOLD:
@@ -250,7 +241,7 @@ class ContentClassifier:
                 is_text=False,
                 is_binary=True,
                 encoding_detected="",
-                flag_match="",
+                flag_match=flag_match,
             )
 
         # entropy < 3.5 → plaintext / simple encoding
@@ -262,7 +253,7 @@ class ContentClassifier:
             is_text=True,
             is_binary=False,
             encoding_detected="raw",
-            flag_match="",
+            flag_match=flag_match,
         )
 
     # ---------------------------------------------------------------------- #
