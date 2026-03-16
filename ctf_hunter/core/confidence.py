@@ -6,13 +6,14 @@ ConfidenceScorer mutates all findings in a session in-place, applying:
   - Flag-pattern match boost when a decoded output itself contains a flag
   - Anomalous entropy boost when decoded output entropy differs significantly from input
   - Penalties for high-entropy garbage or non-printable decoded outputs
+  - Learned weight multipliers from the FeedbackStore (per analyzer + finding type)
 """
 from __future__ import annotations
 
 import math
 import re
 import string
-from typing import List
+from typing import List, Optional
 
 from .report import Finding, Session
 
@@ -82,7 +83,22 @@ class ConfidenceScorer:
        average file entropy, this suggests meaningful decoding occurred.
     4. Garbage penalty: if decoded output is mostly non-printable or has
        very high entropy, penalize confidence.
+    5. Learned-weight multiplier: scale each finding's confidence by the
+       per-(analyzer, finding_type) weight derived from user feedback.
     """
+
+    def __init__(self, weight_learner: Optional["WeightLearner"] = None) -> None:
+        # Import lazily to avoid circular imports and to handle missing DB gracefully.
+        self._weight_learner = weight_learner
+
+    def _get_learner(self):
+        if self._weight_learner is None:
+            try:
+                from .feedback import WeightLearner
+                self._weight_learner = WeightLearner()
+            except Exception:
+                self._weight_learner = None
+        return self._weight_learner
 
     def score_session(self, session: Session) -> None:
         """Mutate all findings in *session* in-place, updating confidence scores."""
@@ -106,6 +122,14 @@ class ConfidenceScorer:
         for file_path, file_findings in by_file.items():
             self._apply_corroboration(file_findings)
             self._apply_decode_quality(file_findings, flag_re)
+
+        # Apply learned weight multipliers from feedback history
+        learner = self._get_learner()
+        if learner is not None:
+            for f in findings:
+                weight = learner.get_weight(f.analyzer, f.title)
+                if weight != 1.0:
+                    f.confidence = f.confidence * weight
 
         # Final clamp
         for f in findings:
