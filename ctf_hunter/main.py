@@ -110,7 +110,6 @@ QStatusBar {
 
 QDockWidget {
     font-weight: bold;
-    titlebar-close-icon: url(close.png);
 }
 QDockWidget::title {
     padding: 4px;
