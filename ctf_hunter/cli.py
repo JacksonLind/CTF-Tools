@@ -32,6 +32,7 @@ from core.report import Finding, Session
 from core.challenge_fingerprinter import ChallengeFingerprinter
 from core.attack_chain import ChainBuilder
 from core.key_registry import KeyRegistry
+from core.key_extractor import KeyExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -489,7 +490,12 @@ def run_cli(argv: list[str] | None = None) -> int:
             for f in all_findings:
                 by_file.setdefault(f.file, []).append(f)
             workspace = list(by_file.items())
+            # Populate key registry from all findings using the KeyExtractor
             key_registry = KeyRegistry()
+            _key_session = Session(findings=list(all_findings))
+            _key_session.key_registry = key_registry
+            for candidate in KeyExtractor().extract(_key_session):
+                key_registry.register(candidate)
             builder = ChainBuilder(workspace, key_registry, flag_pattern)
             attack_chains = builder.build()
     except Exception as exc:

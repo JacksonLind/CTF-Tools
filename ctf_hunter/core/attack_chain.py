@@ -206,7 +206,7 @@ class ChainBuilder:
     # Graph construction
     # ------------------------------------------------------------------
 
-    def _build_graph(self) -> None:  # noqa: C901
+    def _build_graph(self) -> None:
         """Populate the adjacency list with directed edges."""
         # Map: finding_id → list of key types registered from that finding
         key_by_source: Dict[str, List[str]] = {}
@@ -225,95 +225,103 @@ class ChainBuilder:
 
             for j, (file_b, finding_b) in enumerate(self._nodes):
                 if i == j or file_a == file_b:
-                    continue  # skip same node or same file
+                    continue
 
                 detail_b_lower = (finding_b.title + " " + finding_b.detail).lower()
-                edge_added = False
-
-                # ── Criterion 1: value overlap ──────────────────────────
                 vals_b = self._extract_values(finding_b)
-                for va in vals_a:
-                    for vb in vals_b:
-                        if self._value_overlap(va, vb):
-                            transform, param = _detect_transform(finding_a, finding_b, "value_match")
-                            rationale = (
-                                f"Value from '{finding_a.title}' appears in "
-                                f"'{finding_b.title}' — potential data flow link"
-                            )
-                            self._adj.setdefault(i, []).append(
-                                (j, "value_match", transform, param, rationale)
-                            )
-                            edge_added = True
-                            break
-                    if edge_added:
-                        break
 
-                if edge_added:
-                    continue
-
-                # ── Criterion 2: key registry match ─────────────────────
-                # Case A: finding_a is the source of a registered key candidate
-                if finding_a.id in key_by_source:
-                    if any(kw in detail_b_lower for kw in _ENCRYPTED_KEYWORDS):
-                        key_types = key_by_source[finding_a.id]
-                        key_type = key_types[0] if key_types else "generic"
-                        transform, param = _detect_transform(
-                            finding_a, finding_b, "key_registry"
-                        )
-                        rationale = (
-                            f"Key (type: {key_type}) extracted from "
-                            f"'{finding_a.title}' may unlock encrypted "
-                            f"artifact in '{finding_b.title}'"
-                        )
-                        self._adj.setdefault(i, []).append(
-                            (j, "key_registry", transform, param, rationale)
-                        )
-                        edge_added = True
-
-                # Case B: a key value extracted from finding_a is in the registry
-                if not edge_added:
-                    for va in vals_a:
-                        if va in key_values:
-                            if any(kw in detail_b_lower for kw in _ENCRYPTED_KEYWORDS):
-                                key_type = key_values[va]
-                                transform, param = _detect_transform(
-                                    finding_a, finding_b, "key_registry"
-                                )
-                                rationale = (
-                                    f"Key '{va[:48]}' (type: {key_type}) from "
-                                    f"'{finding_a.title}' may unlock encrypted "
-                                    f"artifact in '{finding_b.title}'"
-                                )
-                                self._adj.setdefault(i, []).append(
-                                    (j, "key_registry", transform, param, rationale)
-                                )
-                                edge_added = True
-                                break
-
-                if edge_added:
-                    continue
-
-                # ── Criterion 3: flag pattern after transform ────────────
-                # Heuristic: finding_a provides encoded/transformed content
-                # and finding_b is where the flag should emerge.
-                # We look for findings that produce encoded output (their detail
-                # contains base64/hex blobs) that when decoded yields the flag.
-                is_transform_source = any(
-                    kw in detail_a_lower
-                    for kw in ("base64", "encoded", "obfuscat", "encrypt", "hex string")
+                edge = (
+                    self._check_value_overlap(finding_a, vals_a, finding_b, vals_b)
+                    or self._check_key_registry(finding_a, vals_a, finding_b,
+                                               detail_b_lower, key_by_source, key_values)
+                    or self._check_flag_pattern(finding_a, finding_b, detail_a_lower, vals_b)
                 )
-                is_flag_destination = finding_b.flag_match or any(
-                    self._flag_re.search(v) for v in vals_b
-                )
-                if is_transform_source and is_flag_destination:
-                    transform, param = _detect_transform(finding_a, finding_b, "flag_pattern")
+                if edge:
+                    self._adj.setdefault(i, []).append((j, *edge))
+
+    def _check_value_overlap(
+        self,
+        finding_a: Finding,
+        vals_a: List[str],
+        finding_b: Finding,
+        vals_b: List[str],
+    ) -> Optional[Tuple[str, str, str, str]]:
+        """Return edge tuple if a value from finding_a appears in finding_b."""
+        for va in vals_a:
+            for vb in vals_b:
+                if self._value_overlap(va, vb):
+                    transform, param = _detect_transform(finding_a, finding_b, "value_match")
                     rationale = (
-                        f"Applying transform from '{finding_a.title}' to content "
-                        f"in '{finding_b.title}' may reveal the flag"
+                        f"Value from '{finding_a.title}' appears in "
+                        f"'{finding_b.title}' — potential data flow link"
                     )
-                    self._adj.setdefault(i, []).append(
-                        (j, "flag_pattern", transform, param, rationale)
-                    )
+                    return ("value_match", transform, param, rationale)
+        return None
+
+    def _check_key_registry(
+        self,
+        finding_a: Finding,
+        vals_a: List[str],
+        finding_b: Finding,
+        detail_b_lower: str,
+        key_by_source: Dict[str, List[str]],
+        key_values: Dict[str, str],
+    ) -> Optional[Tuple[str, str, str, str]]:
+        """Return edge tuple if a key from finding_a can unlock finding_b."""
+        if not any(kw in detail_b_lower for kw in _ENCRYPTED_KEYWORDS):
+            return None
+
+        # Case A: finding_a is the registered source of a key candidate
+        if finding_a.id in key_by_source:
+            key_types = key_by_source[finding_a.id]
+            key_type = key_types[0] if key_types else "generic"
+            transform, param = _detect_transform(finding_a, finding_b, "key_registry")
+            rationale = (
+                f"Key (type: {key_type}) extracted from "
+                f"'{finding_a.title}' may unlock encrypted "
+                f"artifact in '{finding_b.title}'"
+            )
+            return ("key_registry", transform, param, rationale)
+
+        # Case B: a value extracted from finding_a matches a registered key
+        for va in vals_a:
+            if va in key_values:
+                key_type = key_values[va]
+                transform, param = _detect_transform(finding_a, finding_b, "key_registry")
+                rationale = (
+                    f"Key '{va[:48]}' (type: {key_type}) from "
+                    f"'{finding_a.title}' may unlock encrypted "
+                    f"artifact in '{finding_b.title}'"
+                )
+                return ("key_registry", transform, param, rationale)
+
+        return None
+
+    def _check_flag_pattern(
+        self,
+        finding_a: Finding,
+        finding_b: Finding,
+        detail_a_lower: str,
+        vals_b: List[str],
+    ) -> Optional[Tuple[str, str, str, str]]:
+        """Return edge tuple if applying finding_a's transform may reveal the flag."""
+        is_transform_source = any(
+            kw in detail_a_lower
+            for kw in ("base64", "encoded", "obfuscat", "encrypt", "hex string")
+        )
+        if not is_transform_source:
+            return None
+        is_flag_destination = finding_b.flag_match or any(
+            self._flag_re.search(v) for v in vals_b
+        )
+        if not is_flag_destination:
+            return None
+        transform, param = _detect_transform(finding_a, finding_b, "flag_pattern")
+        rationale = (
+            f"Applying transform from '{finding_a.title}' to content "
+            f"in '{finding_b.title}' may reveal the flag"
+        )
+        return ("flag_pattern", transform, param, rationale)
 
     # ------------------------------------------------------------------
     # Path enumeration
@@ -370,13 +378,13 @@ class ChainBuilder:
         )
 
         # Deduplicate: treat same node-set as equivalent
-        seen: List[frozenset] = []
+        seen: set[frozenset] = set()
         top_chains: List[Chain] = []
         for _score, path in scored:
             node_set = frozenset(path)
             if node_set in seen:
                 continue
-            seen.append(node_set)
+            seen.add(node_set)
 
             steps: Chain = []
             for k, idx in enumerate(path):

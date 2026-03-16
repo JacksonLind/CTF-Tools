@@ -44,6 +44,14 @@ _SEV_COLOURS: dict[str, tuple[str, str]] = {
 }
 _DEFAULT_SEV = ("#333333", "#f8f8f8")
 
+# Transforms that are descriptive labels rather than executable pipeline operations
+_NON_EXECUTABLE_TRANSFORMS: frozenset[str] = frozenset([
+    "Initial finding",
+    "Data flow",
+    "Data Overlap",
+    "value_match",
+])
+
 
 def _sev_colours(sev: str) -> tuple[str, str]:
     return _SEV_COLOURS.get(sev.upper(), _DEFAULT_SEV)
@@ -268,7 +276,7 @@ class _ChainCard(QFrame):
         for step in self._chain[1:]:
             tr_name = step.transform
             # Skip descriptive-only transforms that don't map to pipeline operations
-            if tr_name in ("Initial finding", "Data flow", "Data Overlap", "value_match"):
+            if tr_name in _NON_EXECUTABLE_TRANSFORMS:
                 continue
             configs.append({"transform": tr_name, "param": step.transform_param})
 
@@ -356,7 +364,9 @@ class AttackChainsTab(QWidget):
             builder = ChainBuilder(self._workspace, self._key_registry)
             self._chains = builder.build()
         except Exception as exc:  # pragma: no cover
-            self._set_status(f"Chain building failed: {exc}")
+            self._set_status(
+                f"Chain building failed with {len(self._workspace)} file(s): {exc}"
+            )
             return
 
         self._rebuild_cards()
