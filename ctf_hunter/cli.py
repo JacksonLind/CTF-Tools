@@ -10,6 +10,8 @@ Usage examples:
     python main.py --cli --depth deep --flag 'HTB\\{[^}]+\\}' challenge.png
     python main.py --cli --format json --output results.json *.bin
     python main.py --cli --depth auto --format markdown -o report.md folder/
+    python main.py --cli --feedback <finding_id>:correct
+    python main.py --cli --feedback-stats
 """
 from __future__ import annotations
 
@@ -26,6 +28,9 @@ from typing import List
 
 from core.dispatcher import dispatch
 from core.report import Finding
+
+# Path for persisting the most-recent CLI run's findings so --feedback can look them up.
+_LAST_RUN_PATH = Path.home() / ".ctf_hunter" / "last_run.json"
 
 
 # ── Formatters ────────────────────────────────────────────────────────────
@@ -169,7 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "targets",
-        nargs="+",
+        nargs="*",
         help="Files or directories to analyze",
     )
     parser.add_argument(
@@ -216,6 +221,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Minimum severity filter",
     )
+    parser.add_argument(
+        "--feedback",
+        metavar="FINDING_ID:correct|incorrect",
+        default=None,
+        help=(
+            "Record feedback for a finding from the last run. "
+            "Example: --feedback abc123:correct"
+        ),
+    )
+    parser.add_argument(
+        "--feedback-stats",
+        action="store_true",
+        help="Print a table of learned confidence weights per analyzer and finding type",
+    )
     return parser
 
 
@@ -224,16 +243,149 @@ def build_parser() -> argparse.ArgumentParser:
 _SEVERITY_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "INFO": 3}
 
 
+def _handle_feedback(spec: str) -> int:
+    """Process --feedback FINDING_ID:correct|incorrect. Returns exit code."""
+    if ":" not in spec:
+        print(
+            "Error: --feedback expects FINDING_ID:correct or FINDING_ID:incorrect",
+            file=sys.stderr,
+        )
+        return 1
+    finding_id, verdict = spec.rsplit(":", 1)
+    finding_id = finding_id.strip()
+    verdict = verdict.strip().lower()
+    if verdict not in ("correct", "incorrect"):
+        print(
+            f"Error: verdict must be 'correct' or 'incorrect', got {verdict!r}",
+            file=sys.stderr,
+        )
+        return 1
+    was_correct = verdict == "correct"
+
+    # Load last run
+    if not _LAST_RUN_PATH.exists():
+        print(
+            f"Error: no last-run data found at {_LAST_RUN_PATH}. "
+            "Run an analysis first.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        with open(_LAST_RUN_PATH, encoding="utf-8") as fh:
+            last_findings = json.load(fh)
+    except Exception as exc:
+        print(f"Error reading last-run data: {exc}", file=sys.stderr)
+        return 1
+
+    # Find the matching finding (prefix match)
+    matches = [f for f in last_findings if f.get("id", "").startswith(finding_id)]
+    if not matches:
+        print(
+            f"Error: no finding with id starting with {finding_id!r} in last run.",
+            file=sys.stderr,
+        )
+        return 1
+    if len(matches) > 1:
+        ids = ", ".join(m["id"][:12] for m in matches)
+        print(
+            f"Error: prefix {finding_id!r} is ambiguous — matches: {ids}. "
+            "Provide more characters.",
+            file=sys.stderr,
+        )
+        return 1
+    match = matches[0]
+
+    try:
+        from core.feedback import FeedbackStore
+        store = FeedbackStore()
+        store.record(
+            analyzer=match.get("analyzer", ""),
+            finding_type=match.get("title", ""),
+            encoding="",
+            confidence_score=float(match.get("confidence", 0.5)),
+            was_correct=was_correct,
+            flag_format=match.get("flag_format", ""),
+        )
+    except Exception as exc:
+        print(f"Error recording feedback: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"Feedback recorded: finding {match['id'][:8]}… "
+        f"({'correct' if was_correct else 'incorrect'})"
+    )
+    return 0
+
+
+def _handle_feedback_stats() -> int:
+    """Print a table of learned weights per analyzer/finding_type. Returns exit code."""
+    try:
+        from core.feedback import FeedbackStore
+        store = FeedbackStore()
+        stats = store.get_feedback_stats()
+    except Exception as exc:
+        print(f"Error reading feedback stats: {exc}", file=sys.stderr)
+        return 1
+
+    if not stats:
+        print("No feedback recorded yet.")
+        return 0
+
+    # Column widths
+    col_a  = max(len("Analyzer"),      max(len(s["analyzer"])     for s in stats))
+    col_ft = max(len("Finding Type"),  max(len(s["finding_type"]) for s in stats))
+    col_w  = 8
+    col_n  = 7
+    col_ok = 7
+    col_no = 9
+
+    header = (
+        f"{'Analyzer':<{col_a}}  "
+        f"{'Finding Type':<{col_ft}}  "
+        f"{'Weight':>{col_w}}  "
+        f"{'Total':>{col_n}}  "
+        f"{'Correct':>{col_ok}}  "
+        f"{'Incorrect':>{col_no}}"
+    )
+    sep = "-" * len(header)
+    print(header)
+    print(sep)
+    for s in stats:
+        print(
+            f"{s['analyzer']:<{col_a}}  "
+            f"{s['finding_type']:<{col_ft}}  "
+            f"{s['weight']:>{col_w}.4f}  "
+            f"{s['total']:>{col_n}}  "
+            f"{s['correct']:>{col_ok}}  "
+            f"{s['incorrect']:>{col_no}}"
+        )
+    return 0
+
+
 def run_cli(argv: list[str] | None = None) -> int:
     """Run CTF Hunter in CLI mode.  Returns 0 on success, 1 on error."""
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # --feedback-stats: just print table and exit
+    if args.feedback_stats:
+        return _handle_feedback_stats()
+
+    # --feedback finding_id:correct|incorrect
+    if args.feedback:
+        return _handle_feedback(args.feedback)
 
     # Validate flag pattern
     try:
         flag_pattern = re.compile(args.flag, re.IGNORECASE)
     except re.error as exc:
         print(f"Error: invalid flag pattern: {exc}", file=sys.stderr)
+        return 1
+
+    # Require targets for analysis
+    if not args.targets:
+        print("Error: no files or directories specified.", file=sys.stderr)
+        parser.print_help(sys.stderr)
         return 1
 
     # Collect targets
@@ -252,6 +404,14 @@ def run_cli(argv: list[str] | None = None) -> int:
             all_findings.extend(findings)
         except Exception as exc:
             print(f"Error analyzing {target}: {exc}", file=sys.stderr)
+
+    # Persist last-run findings for --feedback look-ups
+    try:
+        _LAST_RUN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_LAST_RUN_PATH, "w", encoding="utf-8") as fh:
+            json.dump([f.to_dict() for f in all_findings], fh, indent=2)
+    except Exception:
+        pass  # non-fatal
 
     # Apply filters
     if args.flags_only:

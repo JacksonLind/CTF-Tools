@@ -55,6 +55,7 @@ class ResultPanel(QWidget):
         self._ai_client = ai_client
         self._current_file: str = ""
         self._findings: List[Finding] = []
+        self._selected_finding: Optional[Finding] = None
         # Which triage states are currently visible (all by default)
         self._visible_states: set[str] = set(TRIAGE_STATES)
 
@@ -116,10 +117,46 @@ class ResultPanel(QWidget):
         self._detail_tabs.setMaximumHeight(200)
 
         # Detail tab
+        detail_widget = QWidget()
+        detail_layout = QVBoxLayout(detail_widget)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setSpacing(2)
+
         self._detail = QTextEdit()
         self._detail.setReadOnly(True)
         self._detail.setPlaceholderText("Select a finding to see details…")
-        self._detail_tabs.addTab(self._detail, "Details")
+        detail_layout.addWidget(self._detail)
+
+        # Feedback buttons row
+        feedback_bar = QHBoxLayout()
+        feedback_bar.setSpacing(4)
+        self._feedback_label = QLabel("Feedback:")
+        self._feedback_label.setStyleSheet("font-size: 11px; color: #aaa;")
+        feedback_bar.addWidget(self._feedback_label)
+
+        self._thumbs_up_btn = QPushButton("👍 Correct")
+        self._thumbs_up_btn.setFixedHeight(22)
+        self._thumbs_up_btn.setStyleSheet("font-size: 11px; padding: 1px 6px;")
+        self._thumbs_up_btn.setToolTip("Mark this finding as correct")
+        self._thumbs_up_btn.setEnabled(False)
+        self._thumbs_up_btn.clicked.connect(self._on_thumbs_up)
+        feedback_bar.addWidget(self._thumbs_up_btn)
+
+        self._thumbs_down_btn = QPushButton("👎 Incorrect")
+        self._thumbs_down_btn.setFixedHeight(22)
+        self._thumbs_down_btn.setStyleSheet("font-size: 11px; padding: 1px 6px;")
+        self._thumbs_down_btn.setToolTip("Mark this finding as incorrect")
+        self._thumbs_down_btn.setEnabled(False)
+        self._thumbs_down_btn.clicked.connect(self._on_thumbs_down)
+        feedback_bar.addWidget(self._thumbs_down_btn)
+
+        self._feedback_status = QLabel("")
+        self._feedback_status.setStyleSheet("font-size: 11px; color: #aaa;")
+        feedback_bar.addWidget(self._feedback_status)
+        feedback_bar.addStretch()
+        detail_layout.addLayout(feedback_bar)
+
+        self._detail_tabs.addTab(detail_widget, "Details")
 
         # AI output tab
         self._ai_output = QTextEdit()
@@ -237,6 +274,10 @@ class ResultPanel(QWidget):
             if f.triage_note:
                 detail = f"[Triage note: {f.triage_note}]\n\n{detail}"
             self._detail.setPlainText(detail)
+            self._selected_finding = f
+            self._thumbs_up_btn.setEnabled(True)
+            self._thumbs_down_btn.setEnabled(True)
+            self._feedback_status.setText("")
             self.finding_selected.emit(f)
 
     def _finding_context_menu(self, pos) -> None:
@@ -311,6 +352,25 @@ class ResultPanel(QWidget):
         if ok:
             f.triage_note = text
             self.triage_changed.emit(f)
+
+    def _on_thumbs_up(self) -> None:
+        self._record_feedback(was_correct=True)
+
+    def _on_thumbs_down(self) -> None:
+        self._record_feedback(was_correct=False)
+
+    def _record_feedback(self, was_correct: bool) -> None:
+        f = self._selected_finding
+        if f is None:
+            return
+        try:
+            from core.feedback import FeedbackStore
+            store = FeedbackStore()
+            store.record_finding(f, was_correct=was_correct)
+            label = "✅ Marked correct" if was_correct else "❌ Marked incorrect"
+            self._feedback_status.setText(label)
+        except Exception as exc:
+            self._feedback_status.setText(f"Error: {exc}")
 
     def _analyze_with_ai(self) -> None:
         if not self._ai_client or not self._ai_client.available:
