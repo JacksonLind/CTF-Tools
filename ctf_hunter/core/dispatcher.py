@@ -135,8 +135,7 @@ def dispatch(
     Modes:
       fast  – Quick targeted checks.
       deep  – Exhaustive checks.
-      auto  – Run fast first; re-run only relevant analyzers in deep mode
-              for regions with findings confidence >= 0.6.
+      auto  – Run fast first; then run all analyzers in deep mode.
     """
     if depth == "auto":
         return _dispatch_auto(path, flag_pattern, ai_client)
@@ -154,47 +153,19 @@ def _dispatch_auto(
     flag_pattern: re.Pattern,
     ai_client: Optional[AIClient],
 ) -> List[Finding]:
-    """AUTO mode: fast first, then deep only for high-confidence regions."""
+    """AUTO mode: fast first, then deep with all analyzers."""
     # Phase 1: fast
     fast_findings = _run_dispatch(path, flag_pattern, "fast", ai_client)
     _score_findings(fast_findings, flag_pattern, "fast")
 
-    # Identify high-confidence findings and the analyzers responsible
-    high_conf = [f for f in fast_findings if f.confidence >= 0.6 and f.duplicate_of is None]
-    if not high_conf:
-        extra = _run_redispatch_fallback(fast_findings, flag_pattern, "fast")
-        if extra:
-            fast_findings = deduplicate(fast_findings + extra)
-            _score_findings(fast_findings, flag_pattern, "fast")
-        return fast_findings
-
-    responsible_analyzers: set[str] = {f.analyzer for f in high_conf}
-    high_conf_offsets: list[int] = [f.offset for f in high_conf if f.offset >= 0]
-
-    # Phase 2: deep, scoped to responsible analyzers
+    # Phase 2: deep, all analyzers (every analyzer must explore every path)
     deep_findings = _run_dispatch(
         path, flag_pattern, "deep", ai_client,
-        restrict_analyzers=responsible_analyzers,
     )
     _score_findings(deep_findings, flag_pattern, "deep")
 
-    # Merge: start with fast findings, add deep findings not already covered
-    fast_ids = {f.id for f in fast_findings}
-    # Build analyzer name set once to avoid O(n*m) check in loop
-    fast_analyzer_names: set[str] = {
-        ff.analyzer for ff in fast_findings if ff.duplicate_of is None
-    }
-    merged = list(fast_findings)
-    for f in deep_findings:
-        # Skip analyzers that produced zero findings in fast and aren't corroborated
-        if f.analyzer not in fast_analyzer_names:
-            # Only include if there's a corroborating analyzer at the same region
-            if f.offset >= 0 and any(
-                abs(f.offset - off) <= 32 for off in high_conf_offsets
-            ):
-                merged.append(f)
-        else:
-            merged.append(f)
+    # Merge: start with fast findings, add all deep findings
+    merged = list(fast_findings) + list(deep_findings)
 
     deduped = deduplicate(merged)
     extra = _run_redispatch_fallback(deduped, flag_pattern, "deep")

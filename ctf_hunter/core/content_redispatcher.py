@@ -9,7 +9,7 @@ the result through the full existing analyzer suite.
 Processing steps
 ----------------
 A. Classify the blob using :class:`~ctf_hunter.core.content_classifier.ContentClassifier`.
-B. If a flag pattern is found directly in the data, emit a HIGH finding and stop.
+B. If a flag pattern is found directly in the data, emit a HIGH finding and continue.
 C. If an encoding is detected, decode / decrypt the data and recurse on the result.
    Also try XOR brute-force (single-byte and multi-byte rotating key) on any blob.
 D. Re-dispatch the blob as a virtual file through all suggested analyzers.
@@ -222,7 +222,6 @@ class ContentRedispatcher:
                 flag_match=True,
                 confidence=0.99,
             ))
-            return findings
 
         # ── Step C: encoding unwrap → recurse ────────────────────────────────
         children = self._unwrap(content, classification)
