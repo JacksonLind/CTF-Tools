@@ -127,6 +127,26 @@ class ResultPanel(QWidget):
         self._detail.setPlaceholderText("Select a finding to see details…")
         detail_layout.addWidget(self._detail)
 
+        # Collapsible "Score breakdown" section
+        breakdown_toggle_bar = QHBoxLayout()
+        breakdown_toggle_bar.setSpacing(2)
+        self._breakdown_toggle_btn = QPushButton("▶ Score breakdown")
+        self._breakdown_toggle_btn.setCheckable(True)
+        self._breakdown_toggle_btn.setChecked(False)
+        self._breakdown_toggle_btn.setFixedHeight(20)
+        self._breakdown_toggle_btn.setStyleSheet("font-size: 11px; padding: 1px 4px; text-align:left;")
+        self._breakdown_toggle_btn.clicked.connect(self._on_breakdown_toggle)
+        breakdown_toggle_bar.addWidget(self._breakdown_toggle_btn)
+        breakdown_toggle_bar.addStretch()
+        detail_layout.addLayout(breakdown_toggle_bar)
+
+        self._breakdown_text = QTextEdit()
+        self._breakdown_text.setReadOnly(True)
+        self._breakdown_text.setMaximumHeight(80)
+        self._breakdown_text.setVisible(False)
+        self._breakdown_text.setStyleSheet("font-size: 11px; background: #f5f5f5;")
+        detail_layout.addWidget(self._breakdown_text)
+
         # Feedback buttons row
         feedback_bar = QHBoxLayout()
         feedback_bar.setSpacing(4)
@@ -278,7 +298,29 @@ class ResultPanel(QWidget):
             self._thumbs_up_btn.setEnabled(True)
             self._thumbs_down_btn.setEnabled(True)
             self._feedback_status.setText("")
+            # Populate score breakdown
+            breakdown = getattr(f, "confidence_breakdown", {})
+            if breakdown:
+                lines = []
+                for key, val in breakdown.items():
+                    sign = "+" if val >= 0 else ""
+                    lines.append(f"  {key}: {sign}{val:.2f}")
+                self._breakdown_text.setPlainText("\n".join(lines))
+                self._breakdown_toggle_btn.setEnabled(True)
+            else:
+                self._breakdown_text.setPlainText("(no breakdown recorded)")
+                self._breakdown_toggle_btn.setEnabled(bool(breakdown))
+            # Reset toggle to collapsed on each new selection
+            self._breakdown_toggle_btn.setChecked(False)
+            self._breakdown_text.setVisible(False)
+            self._breakdown_toggle_btn.setText("▶ Score breakdown")
             self.finding_selected.emit(f)
+
+    def _on_breakdown_toggle(self, checked: bool) -> None:
+        self._breakdown_text.setVisible(checked)
+        self._breakdown_toggle_btn.setText(
+            "▼ Score breakdown" if checked else "▶ Score breakdown"
+        )
 
     def _finding_context_menu(self, pos) -> None:
         item = self._tree.itemAt(pos)

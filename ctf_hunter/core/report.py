@@ -34,6 +34,8 @@ class Finding:
     triage: str = "untriaged"       # untriaged | promising | investigating | dead_end | confirmed_flag
     triage_note: str = ""           # free-text annotation
     source_finding_id: Optional[str] = None  # set on findings produced by ContentRedispatcher
+    # Scoring transparency: each key is a bonus/penalty name, value is its contribution.
+    confidence_breakdown: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -45,6 +47,7 @@ class Finding:
         known.setdefault("triage", "untriaged")
         known.setdefault("triage_note", "")
         known.setdefault("source_finding_id", None)
+        known.setdefault("confidence_breakdown", {})
         return cls(**known)
 
 

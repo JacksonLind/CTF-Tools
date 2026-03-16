@@ -931,9 +931,29 @@ class HypothesisEngine:
         session: Session,
     ) -> List[Hypothesis]:
         """Call Claude with the CTF-solver system prompt; inject AI hypotheses."""
+        def _effective_confidence(f: Finding) -> float:
+            """Adjusted sort key that deprioritises XOR-only false positives and
+            promotes high-signal classical/crypto findings."""
+            conf = f.confidence
+            # Deprioritise single-byte XOR chain findings that have no corroboration
+            # and whose only boost was a flag_match on non-printable data.
+            is_xor_single = "xor_0x" in f.detail
+            if is_xor_single and not f.corroboration and f.flag_match:
+                conf -= 0.20
+            # Promote ClassicalCipherAnalyzer and CryptoAnalyzer findings that
+            # produced printable plaintext (indicated by a low-entropy-result boost
+            # or an explicit flag match with a clean breakdown).
+            if f.analyzer in ("ClassicalCipherAnalyzer", "CryptoAnalyzer"):
+                has_entropy_boost = f.confidence_breakdown.get("low_entropy_result", 0) > 0
+                has_clean_flag = f.flag_match and f.confidence_breakdown.get("flag_match_rejected", 0) == 0
+                if has_entropy_boost or has_clean_flag:
+                    conf += 0.15
+            return conf
+
         top = sorted(
             [f for f in findings if f.confidence >= 0.4],
-            key=lambda f: -f.confidence,
+            key=_effective_confidence,
+            reverse=True,
         )[:15]
 
         summary = [

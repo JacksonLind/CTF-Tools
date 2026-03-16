@@ -23,8 +23,19 @@ _REGION_PROXIMITY = 32
 # Penalty applied when decoded content is high-entropy or non-printable.
 _GARBAGE_PENALTY = 0.15
 
-# Boost applied when a decoded value itself contains a flag pattern.
+# Boost applied when a decoded value itself contains a flag pattern
+# and the interior of the flag braces passes the printability gate.
 _FLAG_DECODE_BOOST = 0.20
+
+# Penalty applied when a flag-pattern match is found but the interior of the
+# braces fails the printability gate (likely XOR brute-force noise).
+_FLAG_MATCH_REJECTED_PENALTY = 0.25
+
+# Minimum printable ratio for flag interior to pass the gate.
+_FLAG_INTERIOR_PRINTABLE_THRESHOLD = 0.85
+
+# Minimum length of flag interior to pass the gate.
+_FLAG_INTERIOR_MIN_LEN = 3
 
 # Boost applied when a decoded value has notably lower entropy than its source
 # (high-entropy source, low-entropy result is a good sign).
@@ -68,6 +79,24 @@ def _extract_decoded_result(detail: str) -> str:
     if "→" in detail:
         return detail.split("→", 1)[1].strip()
     return ""
+
+
+def _flag_interior_printable(flag_match_str: str) -> bool:
+    """Return True if the content inside the flag braces is human-readable.
+
+    Extracts everything between the first '{' and the last '}', then checks
+    that at least 85% of characters are printable ASCII (32–126) and that
+    the interior is at least 3 characters long.
+    """
+    brace_open = flag_match_str.find("{")
+    brace_close = flag_match_str.rfind("}")
+    if brace_open == -1 or brace_close <= brace_open:
+        return False
+    interior = flag_match_str[brace_open + 1:brace_close]
+    if len(interior) < _FLAG_INTERIOR_MIN_LEN:
+        return False
+    printable_ratio = sum(1 for c in interior if 32 <= ord(c) < 127) / len(interior)
+    return printable_ratio >= _FLAG_INTERIOR_PRINTABLE_THRESHOLD
 
 
 class ConfidenceScorer:
@@ -159,6 +188,7 @@ class ConfidenceScorer:
             n = min(len(neighbors), 3)
             boost = n * 0.05
             f.confidence = min(_MAX_CONFIDENCE, f.confidence + boost)
+            f.confidence_breakdown["corroboration"] = +boost
             # Record supporting finding IDs
             for nb in neighbors:
                 if nb.id not in f.corroboration:
@@ -171,19 +201,35 @@ class ConfidenceScorer:
     ) -> None:
         """
         For findings that produced a decoded output (detail contains '→'):
-        - Boost if decoded result matches flag pattern.
+        - Boost if decoded result matches flag pattern AND passes the printability gate.
+        - Penalise if decoded result matches flag pattern but interior is non-printable
+          (i.e. likely XOR brute-force noise).
         - Boost if decoded result has much lower entropy than its encoded input.
         - Penalize if decoded result is mostly non-printable or very high entropy.
+
+        Note: findings whose flag_match is already True (set by analyzers or
+        ContentRedispatcher at creation time) are not re-evaluated here; those
+        are handled upstream (see Fix 2 in content_redispatcher.py).
         """
         for f in findings:
             decoded = _extract_decoded_result(f.detail)
             if not decoded:
                 continue
 
-            # Flag-in-decoded-output boost
-            if flag_re.search(decoded) and not f.flag_match:
-                f.confidence = min(_MAX_CONFIDENCE, f.confidence + _FLAG_DECODE_BOOST)
-                f.flag_match = True
+            # Flag-in-decoded-output: only gate findings where flag_match is not
+            # yet set (i.e., the +0.20 bonus is about to be awarded by this scorer).
+            # Already-flagged findings are handled at creation time.
+            if not f.flag_match:
+                flag_hit = flag_re.search(decoded)
+                if flag_hit:
+                    if _flag_interior_printable(flag_hit.group(0)):
+                        f.confidence = min(_MAX_CONFIDENCE, f.confidence + _FLAG_DECODE_BOOST)
+                        f.flag_match = True
+                        f.confidence_breakdown["flag_match"] = +_FLAG_DECODE_BOOST
+                    else:
+                        # Interior is binary garbage — penalise instead of boosting
+                        f.confidence = max(0.0, f.confidence - _FLAG_MATCH_REJECTED_PENALTY)
+                        f.confidence_breakdown["flag_match_rejected"] = -_FLAG_MATCH_REJECTED_PENALTY
 
             decoded_ent = _string_entropy(decoded)
 
@@ -200,9 +246,14 @@ class ConfidenceScorer:
 
             # Garbage penalty: high entropy decoded result that isn't printable
             if decoded_ent > _HIGH_ENTROPY_THRESHOLD and not _is_mostly_printable(decoded):
-                f.confidence = max(0.0, f.confidence - _GARBAGE_PENALTY)
+                penalty = _GARBAGE_PENALTY
+                f.confidence = max(0.0, f.confidence - penalty)
+                f.confidence_breakdown["garbage_penalty"] = -penalty
             elif decoded_ent > _MEDIUM_ENTROPY_THRESHOLD and not _is_mostly_printable(decoded, 0.70):
-                f.confidence = max(0.0, f.confidence - _GARBAGE_PENALTY * 0.5)
+                penalty = _GARBAGE_PENALTY * 0.5
+                f.confidence = max(0.0, f.confidence - penalty)
+                f.confidence_breakdown["garbage_penalty_partial"] = -penalty
             # Low-entropy result boost: entropy dropped significantly (good decoding)
             elif encoded_ent > 5.0 and decoded_ent < 4.0 and _is_mostly_printable(decoded):
                 f.confidence = min(_MAX_CONFIDENCE, f.confidence + _LOW_ENTROPY_RESULT_BOOST)
+                f.confidence_breakdown["low_entropy_result"] = +_LOW_ENTROPY_RESULT_BOOST

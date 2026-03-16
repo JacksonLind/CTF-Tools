@@ -46,6 +46,8 @@ from .report import Finding, Session
 _TIMEOUT_SECONDS: float = 45.0         # per-root-call time budget (spec requirement)
 _XOR_SINGLE_QUALITY_THRESHOLD: float = 0.85   # min (printable_ratio + flag_bonus) to recurse
 _XOR_MULTI_PRINTABLE_THRESHOLD: float = 0.90  # min printable ratio for multi-byte XOR result
+_XOR_FINDING_PRINTABLE_THRESHOLD: float = 0.75  # min full-output printable ratio for XOR findings
+_XOR_FINDING_CONFIDENCE_CAP: float = 0.30    # confidence cap for suppressed XOR findings
 
 # English unigram frequencies (used for Vigenère hill-climbing)
 _ENGLISH_FREQ: dict[str, float] = {
@@ -209,6 +211,24 @@ class ContentRedispatcher:
             chain_str = (
                 " → ".join(content.encoding_chain) if content.encoding_chain else "raw"
             )
+            # Check whether this result came from a single-byte XOR chain and
+            # apply a printability gate on the full decoded output.
+            is_xor_single = any(
+                step.startswith("xor_0x") for step in content.encoding_chain
+            )
+            finding_confidence = 0.99
+            finding_detail_extra = ""
+            if is_xor_single:
+                printable_ratio = (
+                    sum(1 for b in content.data if 0x20 <= b < 0x7F) / len(content.data)
+                    if content.data else 0.0
+                )
+                if printable_ratio < _XOR_FINDING_PRINTABLE_THRESHOLD:
+                    finding_confidence = _XOR_FINDING_CONFIDENCE_CAP
+                    finding_detail_extra = (
+                        f"\nXOR candidate suppressed: low printable ratio "
+                        f"({printable_ratio:.2f})"
+                    )
             findings.append(Finding(
                 file=content.virtual_filename or "<extracted>",
                 analyzer="ContentRedispatcher",
@@ -218,9 +238,10 @@ class ContentRedispatcher:
                     f"Flag: {classification.flag_match}\n"
                     f"Encoding chain: {chain_str}\n"
                     f"Source finding: {content.source_finding_id}"
+                    f"{finding_detail_extra}"
                 ),
-                flag_match=True,
-                confidence=0.99,
+                flag_match=finding_confidence >= 0.99,
+                confidence=finding_confidence,
             ))
 
         # ── Step C: encoding unwrap → recurse ────────────────────────────────
