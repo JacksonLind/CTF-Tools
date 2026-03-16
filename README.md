@@ -151,12 +151,58 @@ These are **not** installed by default. Edit `requirements.txt` to enable them:
 
 ## Usage
 
+### GUI Mode (default)
+
 ```bash
 cd ctf_hunter
 python main.py
 ```
 
 This launches the GUI. Load files by dragging and dropping them onto the file list, or use the **Add Files** / **Add Folder** buttons in the toolbar. Click **▶ Analyze All** to run all applicable analyzers. Results appear in the Findings Tree, organized by severity (HIGH, MEDIUM, LOW, INFO).
+
+### CLI Mode (headless)
+
+Run CTF Hunter from the command line without opening the GUI. This enables scripted workflows, CI/CD pipelines, and integration with other tools.
+
+```bash
+cd ctf_hunter
+python main.py --cli [options] <files or directories...>
+```
+
+#### Examples
+
+```bash
+# Analyze a single file
+python main.py --cli challenge.bin
+
+# Deep analysis with a custom flag pattern
+python main.py --cli --depth deep --flag 'HTB\{[^}]+\}' challenge.png
+
+# Analyze a folder and output JSON
+python main.py --cli --format json --output results.json challenges/
+
+# Show only flag matches with high confidence
+python main.py --cli --flags-only --min-confidence 0.8 *.bin
+
+# Quiet mode (suppress progress on stderr), CSV output to file
+python main.py --cli --quiet --format csv -o report.csv challenge1.png challenge2.zip
+
+# Filter by severity (show only HIGH and MEDIUM findings)
+python main.py --cli --severity MEDIUM files/
+```
+
+#### CLI Options
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--depth {fast,deep,auto}` | `-d` | Analysis depth (default: `fast`) |
+| `--flag PATTERN` | `-f` | Flag regex pattern (default: `CTF\{[^}]+\}`) |
+| `--format {text,json,markdown,csv,html}` | `-F` | Output format (default: `text`) |
+| `--output FILE` | `-o` | Write output to a file instead of stdout |
+| `--quiet` | `-q` | Suppress progress messages on stderr |
+| `--flags-only` | | Only show findings that match the flag pattern |
+| `--min-confidence N` | | Minimum confidence threshold, 0.0–1.0 (default: 0.0) |
+| `--severity {HIGH,MEDIUM,LOW,INFO}` | | Minimum severity filter |
 
 ### Workflow
 
@@ -203,7 +249,8 @@ This uses PyInstaller to produce a single-file executable in `dist/` (e.g., `dis
 
 ```
 ctf_hunter/
-├── main.py                        # Entry point – initializes the PyQt6 app with Fusion theme
+├── main.py                        # Entry point – launches GUI or CLI based on arguments
+├── cli.py                         # Command-line interface for headless analysis
 ├── build.py                       # PyInstaller packaging script
 ├── requirements.txt               # Python dependencies
 ├── core/
