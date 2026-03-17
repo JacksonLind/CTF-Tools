@@ -262,7 +262,9 @@ class SteganalysisAnalyzer(Analyzer):
 
     def _analyze_image(self, path: str, flag_pattern: re.Pattern, depth: str) -> List[Finding]:
         findings: List[Finding] = []
-        findings.extend(self._img_lsb_extraction(path, flag_pattern))
+        # lsb_matrix_scan replaces _img_lsb_extraction: runs the full channel/bit-plane/order
+        # matrix in deep mode and a reduced R/G/B LSB0 row-major set in fast mode.
+        findings.extend(self.lsb_matrix_scan(path, flag_pattern, depth))
         findings.extend(self._img_lsb_interleaved_rgb(path, flag_pattern))
         findings.extend(self._img_appended_data(path, flag_pattern))
         findings.extend(self._img_metadata_stego(path, flag_pattern))
@@ -360,6 +362,298 @@ class SteganalysisAnalyzer(Analyzer):
                     detail, severity=severity, offset=0,
                     flag_match=flag_match, confidence=confidence,
                 ))
+
+        return findings
+
+    # ------------------------------------------------------------------
+    # LSB MATRIX SCAN — systematic channel / bit-plane / order sweep
+    # ------------------------------------------------------------------
+
+    def lsb_matrix_scan(
+        self,
+        path: str,
+        flag_pattern: re.Pattern,
+        depth: str,
+    ) -> List[Finding]:
+        """Systematic LSB extraction matrix for PNG/BMP/image files.
+
+        Extracts LSB streams for every meaningful combination of:
+          - Channels: individual (R, G, B, A, L) plus multi-channel
+            interleaved orders (RGB, RBG, GRB, GBR, BRG, BGR, RGBA).
+          - Bit planes: 0 (LSB) through 3.
+          - Pixel ordering: row-major and column-major.
+
+        Fast mode: R, G, B (or L) individual channels at bit_plane=0, row-major.
+        Deep mode: all channel orders × bit_planes 0-3 × row/col — up to ~80 streams.
+
+        Scoring and emission rules (applied before emitting any Finding):
+          - printable_ratio = (chars 32-126) / total bytes.
+          - Flag-pattern checked on raw stream, after ROT13, Base64 decode, and
+            single-byte XOR brute-force (keys 1-255, first 512 bytes sampled).
+          - Finding emitted only if printable_ratio > 0.40 OR flag_match is True.
+          - Identical byte streams across multiple combinations are grouped;
+            confidence is boosted (+0.05) for corroborated streams.
+          - Stream that passes the printability gate AND matches a flag pattern
+            is scored >= 0.85 and labelled HIGH.
+
+        Every emitted Finding has confidence_breakdown populated with at minimum:
+          {"channel", "bit_plane", "order", "printable_ratio", "flag_match"}
+        """
+        findings: List[Finding] = []
+
+        try:
+            from PIL import Image
+            import numpy as np
+        except ImportError:
+            return findings
+
+        try:
+            img = Image.open(path)
+            arr = np.array(img)
+        except Exception:
+            return findings
+
+        if arr.ndim < 2:
+            return findings
+
+        mode = img.mode
+
+        # Build channel name → array-index mapping
+        if arr.ndim == 2:
+            ch_map: dict = {"L": 0}
+        elif arr.ndim == 3 and len(mode) == arr.shape[2]:
+            ch_map = {c: i for i, c in enumerate(mode)}
+        elif arr.ndim == 3:
+            ch_map = {str(i): i for i in range(arr.shape[2])}
+        else:
+            return findings
+
+        # Individual channels always included
+        individual: List[Tuple[str, List[int]]] = [
+            (name, [idx]) for name, idx in ch_map.items()
+        ]
+
+        # Multi-channel interleaved orders (only when R, G, B are all present)
+        multi: List[Tuple[str, List[int]]] = []
+        R = ch_map.get("R")
+        G = ch_map.get("G")
+        B = ch_map.get("B")
+        A = ch_map.get("A")
+        if R is not None and G is not None and B is not None:
+            multi = [
+                ("RGB", [R, G, B]),
+                ("RBG", [R, B, G]),
+                ("GRB", [G, R, B]),
+                ("GBR", [G, B, R]),
+                ("BRG", [B, R, G]),
+                ("BGR", [B, G, R]),
+            ]
+            if A is not None:
+                multi.append(("RGBA", [R, G, B, A]))
+
+        if depth == "deep":
+            channel_orders: List[Tuple[str, List[int]]] = individual + multi
+            bit_planes = [0, 1, 2, 3]
+            pix_orders = ["row", "col"]
+        else:
+            # Fast mode: individual R/G/B/L channels at LSB0, row-major only
+            fast_names = {"R", "G", "B", "L"}
+            channel_orders = [(n, idxs) for n, idxs in individual if n in fast_names]
+            if not channel_orders:
+                channel_orders = individual[:3]
+            bit_planes = [0]
+            pix_orders = ["row"]
+
+        MAX_BITS = 100_000
+
+        # ---------------------------------------------------------------
+        # Extract all streams
+        # streams: (order_name, bit_plane, pix_order) → raw bytes
+        # ---------------------------------------------------------------
+        streams: dict = {}
+        for bit_plane in bit_planes:
+            for order_name, order in channel_orders:
+                for pix_order in pix_orders:
+                    try:
+                        if arr.ndim == 2:
+                            flat = (
+                                arr.flatten()
+                                if pix_order == "row"
+                                else arr.T.flatten()
+                            )
+                            bits: List[int] = [
+                                int((int(v) >> bit_plane) & 1) for v in flat[:MAX_BITS]
+                            ]
+                        else:
+                            if pix_order == "row":
+                                pixels_2d = arr.reshape(-1, arr.shape[2])
+                            else:
+                                pixels_2d = arr.transpose(1, 0, 2).reshape(
+                                    -1, arr.shape[2]
+                                )
+                            # Limit by total BITS extracted (pixels * channels_per_pixel)
+                            n_ch = max(len(order), 1)
+                            n_px = min(len(pixels_2d), MAX_BITS // n_ch)
+                            bits = []
+                            for px in pixels_2d[:n_px]:
+                                for ch in order:
+                                    if ch < arr.shape[2]:
+                                        bits.append(
+                                            int((int(px[ch]) >> bit_plane) & 1)
+                                        )
+
+                        if len(bits) < 8:
+                            continue
+
+                        raw = _bits_to_bytes(bits)
+                        streams[(order_name, bit_plane, pix_order)] = raw
+                    except Exception:
+                        continue
+
+        # ---------------------------------------------------------------
+        # Group streams by signature for corroboration detection
+        # sig (first 64 bytes) → list of cache keys that produced it
+        # ---------------------------------------------------------------
+        sig_to_keys: dict = {}
+        for key, raw in streams.items():
+            sig = raw[:64]
+            sig_to_keys.setdefault(sig, []).append(key)
+
+        # ---------------------------------------------------------------
+        # Score each unique stream and emit findings
+        # ---------------------------------------------------------------
+        for sig, keys in sig_to_keys.items():
+            primary_key = keys[0]
+            order_name, bit_plane, pix_order = primary_key
+            raw = streams[primary_key]
+
+            if not raw:
+                continue
+
+            # Printable-ratio (chars 32-126)
+            printable = sum(1 for b in raw if 0x20 <= b <= 0x7E)
+            printable_ratio = printable / len(raw)
+
+            # Flag checks
+            flag_match = False
+            flag_transform = "none"
+
+            try:
+                if flag_pattern.search(raw.decode("utf-8", errors="replace")):
+                    flag_match = True
+                    flag_transform = "raw"
+            except Exception:
+                pass
+
+            if not flag_match:
+                rot = _try_rot13(raw)
+                if rot != raw:
+                    try:
+                        if flag_pattern.search(
+                            rot.decode("utf-8", errors="replace")
+                        ):
+                            flag_match = True
+                            flag_transform = "rot13"
+                    except Exception:
+                        pass
+
+            if not flag_match:
+                b64 = _try_b64(raw)
+                if b64:
+                    try:
+                        if flag_pattern.search(
+                            b64.decode("utf-8", errors="replace")
+                        ):
+                            flag_match = True
+                            flag_transform = "base64"
+                    except Exception:
+                        pass
+
+            if not flag_match:
+                # XOR brute-force over first 512 bytes with common single bytes;
+                # only run if stream shows at least minimal printable content,
+                # to avoid expensive iteration over clearly binary streams.
+                if printable_ratio > 0.20:
+                    xor_sample = raw[:512]
+                    for xor_key in range(1, 256):
+                        xored = bytes(b ^ xor_key for b in xor_sample)
+                        try:
+                            if flag_pattern.search(
+                                xored.decode("utf-8", errors="replace")
+                            ):
+                                flag_match = True
+                                flag_transform = f"xor_0x{xor_key:02x}"
+                                break
+                        except Exception:
+                            continue
+
+            # Emission gate: must pass printability or flag match
+            if printable_ratio <= 0.40 and not flag_match:
+                continue
+
+            is_corroborated = len(keys) > 1
+
+            # Confidence scoring
+            if flag_match and printable_ratio > 0.40:
+                # Passes BOTH gates → score >= 0.85
+                confidence = max(0.85, _FLAG_CONF)
+                severity = "HIGH"
+            elif flag_match:
+                confidence = _FLAG_CONF
+                severity = "HIGH"
+            else:
+                confidence = _PRINT_CONF
+                severity = "MEDIUM"
+
+            if is_corroborated:
+                confidence = min(confidence + 0.05, 1.0)
+
+            # Build finding title
+            title = (
+                f"LSB extraction — channel={order_name}, bit_plane={bit_plane},"
+                f" order={pix_order}"
+            )
+            if is_corroborated:
+                n_corr = len(keys)
+                corr_labels = [
+                    f"{n}/{bp}/{po}" for n, bp, po in keys[1:4]
+                ]
+                suffix = f", +{n_corr - 4} more" if n_corr > 4 else ""
+                title += f" [corroborated by: {', '.join(corr_labels)}{suffix}]"
+            if flag_transform != "none":
+                title += f" [flag via {flag_transform}]"
+
+            raw_hex = raw[:64].hex()
+            raw_preview = raw[:64].decode("latin-1", errors="replace")
+            detail = (
+                f"printable_ratio={printable_ratio:.3f} | "
+                f"raw_hex={raw_hex} | "
+                f"preview={raw_preview!r}"
+            )
+
+            breakdown: dict = {
+                "channel": order_name,
+                "bit_plane": bit_plane,
+                "order": pix_order,
+                "printable_ratio": round(printable_ratio, 4),
+                "flag_match": flag_match,
+            }
+            if flag_transform != "none":
+                breakdown["flag_transform"] = flag_transform
+            if is_corroborated:
+                breakdown["corroboration_count"] = len(keys)
+
+            f = self._finding(
+                path,
+                title,
+                detail,
+                severity=severity,
+                offset=0,
+                flag_match=flag_match,
+                confidence=confidence,
+            )
+            f.confidence_breakdown = breakdown
+            findings.append(f)
 
         return findings
 
