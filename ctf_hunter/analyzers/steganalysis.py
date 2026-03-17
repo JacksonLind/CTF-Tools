@@ -448,7 +448,7 @@ class SteganalysisAnalyzer(Analyzer):
         except ImportError:
             return findings
         try:
-            img = Image.open(path)
+            img = Image.open(path).convert("RGB")
             arr = np.array(img)
         except Exception:
             return findings
@@ -520,7 +520,7 @@ class SteganalysisAnalyzer(Analyzer):
             except Exception:
                 flag_match = False
 
-            if flag_match or _is_printable(raw):
+            if flag_match or _is_printable(raw if stopped else raw[:4096]):
                 null_note = " (null-terminated)" if stopped else ""
                 detail = (
                     f"Channel-sequential LSB order={order_name}{null_note}: "
