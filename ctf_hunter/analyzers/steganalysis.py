@@ -126,6 +126,14 @@ def _binary_entropy(p: float) -> float:
     q = 1.0 - p
     return -(p * math.log2(p) + q * math.log2(q))
 
+def _printable_prefix(data: bytes, min_len: int = 8) -> bytes:
+    """Return the longest leading run of printable bytes in data."""
+    for i in range(len(data), 0, -1):
+        chunk = data[:i]
+        if _is_printable(chunk):
+            return chunk
+    return b""
+
 
 def decode_pipeline(raw: bytes, flag_pattern: re.Pattern) -> Tuple[bool, float, str]:
     """Apply full decode pipeline. Returns (flag_match, confidence, detail)."""
@@ -408,15 +416,24 @@ class SteganalysisAnalyzer(Analyzer):
             return findings
 
         raw = bytes(result)
-        text = raw.decode("latin-1")
 
         try:
-            flag_match = bool(flag_pattern.search(text))
+            flag_match = bool(flag_pattern.search(raw.decode("latin-1")))
         except Exception:
             flag_match = False
 
-        if flag_match or _is_printable(raw):
-            detail = f"Interleaved RGB LSB: {text!r}  hex={raw[:64].hex()}"
+        # If stop=True we have a clean null boundary — use full payload.
+        # If not, find the longest printable prefix so a flag not followed
+        # by a null byte isn't discarded due to trailing image noise.
+        if stop:
+            check_bytes = raw
+        else:
+            check_bytes = _printable_prefix(raw)
+
+        if flag_match or (check_bytes and len(check_bytes) >= 8):
+            report_text = check_bytes.decode("latin-1", errors="replace")
+            null_note = " (null-terminated)" if stop else f" (printable prefix {len(check_bytes)}b)"
+            detail = f"Interleaved RGB LSB{null_note}: {report_text!r}  hex={check_bytes[:64].hex()}"
             findings.append(self._finding(
                 path,
                 "Interleaved RGB LSB extraction (R→G→B per pixel, null-terminated)",
@@ -426,7 +443,6 @@ class SteganalysisAnalyzer(Analyzer):
                 flag_match=flag_match,
                 confidence=_FLAG_CONF if flag_match else _PRINT_CONF,
             ))
-
         return findings
 
     def _img_channel_sequential_lsb(self, path: str, flag_pattern: re.Pattern) -> List[Finding]:
@@ -520,11 +536,17 @@ class SteganalysisAnalyzer(Analyzer):
             except Exception:
                 flag_match = False
 
-            if flag_match or _is_printable(raw if stopped else raw[:4096]):
-                null_note = " (null-terminated)" if stopped else ""
+            if stopped:
+                check_bytes = raw
+            else:
+                check_bytes = _printable_prefix(raw)
+            
+            if flag_match or (check_bytes and len(check_bytes) >= 8):
+                null_note = " (null-terminated)" if stopped else f" (printable prefix {len(check_bytes)}b)"
+                report_text = check_bytes.decode("latin-1", errors="replace")
                 detail = (
                     f"Channel-sequential LSB order={order_name}{null_note}: "
-                    f"{text!r}  hex={raw[:64].hex()}"
+                    f"{report_text!r}  hex={check_bytes[:64].hex()}"
                 )
                 findings.append(self._finding(
                     path,
@@ -535,7 +557,6 @@ class SteganalysisAnalyzer(Analyzer):
                     flag_match=flag_match,
                     confidence=_FLAG_CONF if flag_match else _PRINT_CONF,
                 ))
-
         return findings
 
     def _img_multibit_planes(self, path: str, flag_pattern: re.Pattern) -> List[Finding]:
