@@ -127,6 +127,24 @@ class ResultPanel(QWidget):
         self._detail.setPlaceholderText("Select a finding to see details…")
         detail_layout.addWidget(self._detail)
 
+        # Score breakdown (collapsible toggle + content)
+        self._breakdown_toggle = QPushButton("▶ Score breakdown")
+        self._breakdown_toggle.setCheckable(True)
+        self._breakdown_toggle.setFixedHeight(20)
+        self._breakdown_toggle.setStyleSheet(
+            "text-align: left; font-size: 11px; padding: 0px 4px; border: none; color: #555;"
+        )
+        self._breakdown_toggle.clicked.connect(self._on_breakdown_toggle)
+        self._breakdown_toggle.setVisible(False)
+        detail_layout.addWidget(self._breakdown_toggle)
+
+        self._breakdown_text = QTextEdit()
+        self._breakdown_text.setReadOnly(True)
+        self._breakdown_text.setMaximumHeight(70)
+        self._breakdown_text.setStyleSheet("font-size: 11px; color: #555; background: #f5f5f5;")
+        self._breakdown_text.setVisible(False)
+        detail_layout.addWidget(self._breakdown_text)
+
         # Feedback buttons row
         feedback_bar = QHBoxLayout()
         feedback_bar.setSpacing(4)
@@ -278,7 +296,27 @@ class ResultPanel(QWidget):
             self._thumbs_up_btn.setEnabled(True)
             self._thumbs_down_btn.setEnabled(True)
             self._feedback_status.setText("")
+
+            # Populate and show/hide score breakdown
+            breakdown = getattr(f, "confidence_breakdown", {})
+            if breakdown:
+                lines = [f"  {k}: {'+' if v >= 0 else ''}{v:.2f}" for k, v in breakdown.items()]
+                self._breakdown_text.setPlainText("\n".join(lines))
+                self._breakdown_toggle.setVisible(True)
+            else:
+                self._breakdown_toggle.setChecked(False)
+                self._breakdown_toggle.setText("▶ Score breakdown")
+                self._breakdown_text.setVisible(False)
+                self._breakdown_toggle.setVisible(False)
+
             self.finding_selected.emit(f)
+
+    def _on_breakdown_toggle(self, checked: bool) -> None:
+        """Show or hide the score breakdown text area."""
+        self._breakdown_toggle.setText(
+            ("▼" if checked else "▶") + " Score breakdown"
+        )
+        self._breakdown_text.setVisible(checked)
 
     def _finding_context_menu(self, pos) -> None:
         item = self._tree.itemAt(pos)

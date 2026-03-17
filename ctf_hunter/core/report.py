@@ -34,6 +34,9 @@ class Finding:
     triage: str = "untriaged"       # untriaged | promising | investigating | dead_end | confirmed_flag
     triage_note: str = ""           # free-text annotation
     source_finding_id: Optional[str] = None  # set on findings produced by ContentRedispatcher
+    # Scoring transparency: each key is a scoring step, value is the delta applied.
+    # e.g. {"flag_match": 0.20, "printability_gate": -0.25, "corroboration": 0.10}
+    confidence_breakdown: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -41,10 +44,11 @@ class Finding:
     @classmethod
     def from_dict(cls, data: dict) -> "Finding":
         known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
-        # Backward compatibility: default missing triage fields
+        # Backward compatibility: default missing fields
         known.setdefault("triage", "untriaged")
         known.setdefault("triage_note", "")
         known.setdefault("source_finding_id", None)
+        known.setdefault("confidence_breakdown", {})
         return cls(**known)
 
 
