@@ -209,6 +209,26 @@ class ContentRedispatcher:
             chain_str = (
                 " → ".join(content.encoding_chain) if content.encoding_chain else "raw"
             )
+            # Default confidence for a flag-pattern hit.
+            flag_confidence = 0.99
+            flag_detail_suffix = ""
+
+            # Fix 2: XOR brute-force false-positive suppression.
+            # When the encoding chain includes a single-byte XOR step, validate
+            # that the full decoded blob is mostly printable ASCII before
+            # awarding high confidence.  Binary garbage that happens to contain
+            # a flag-shaped byte sequence is a common source of false positives.
+            if any("xor_0x" in step for step in content.encoding_chain):
+                xor_printable = (
+                    sum(1 for b in content.data if 0x20 <= b < 0x7F)
+                    / max(len(content.data), 1)
+                )
+                if xor_printable < 0.75:
+                    flag_confidence = 0.30
+                    flag_detail_suffix = (
+                        f"\nXOR candidate suppressed: low printable ratio ({xor_printable:.2f})"
+                    )
+
             findings.append(Finding(
                 file=content.virtual_filename or "<extracted>",
                 analyzer="ContentRedispatcher",
@@ -218,9 +238,10 @@ class ContentRedispatcher:
                     f"Flag: {classification.flag_match}\n"
                     f"Encoding chain: {chain_str}\n"
                     f"Source finding: {content.source_finding_id}"
+                    + flag_detail_suffix
                 ),
                 flag_match=True,
-                confidence=0.99,
+                confidence=flag_confidence,
             ))
 
         # ── Step C: encoding unwrap → recurse ────────────────────────────────

@@ -900,6 +900,26 @@ class HypothesisEngine:
 
     # ------------------------------------------------------------------
 
+    def _finding_rank_score(self, f: Finding) -> float:
+        """Adjusted score used when ranking findings for hypothesis generation.
+
+        Deprioritizes single-byte XOR findings whose high confidence came
+        exclusively from a flag pattern match with no corroborating signal,
+        and promotes trusted cipher analyzers that produced printable output.
+        """
+        score = f.confidence
+        # Deprioritize XOR candidates that are only high-ranked due to a flag
+        # match and have no corroboration from a second analyzer.
+        if "xor_0x" in f.detail and f.flag_match and not f.corroboration:
+            score -= 0.30
+        # Promote findings from trusted cipher analyzers with a flag match,
+        # even if their base confidence is lower than XOR candidates.
+        if f.analyzer in ("ClassicalCipherAnalyzer", "CryptoAnalyzer") and f.flag_match:
+            score += 0.15
+        return score
+
+    # ------------------------------------------------------------------
+
     def _rule_based(self, findings: List[Finding]) -> List[Hypothesis]:
         results: List[Hypothesis] = []
         for rule in _RULES:
@@ -933,7 +953,7 @@ class HypothesisEngine:
         """Call Claude with the CTF-solver system prompt; inject AI hypotheses."""
         top = sorted(
             [f for f in findings if f.confidence >= 0.4],
-            key=lambda f: -f.confidence,
+            key=lambda f: -self._finding_rank_score(f),
         )[:15]
 
         summary = [
