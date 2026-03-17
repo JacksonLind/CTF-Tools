@@ -264,6 +264,7 @@ class SteganalysisAnalyzer(Analyzer):
         findings: List[Finding] = []
         findings.extend(self._img_lsb_extraction(path, flag_pattern))
         findings.extend(self._img_lsb_interleaved_rgb(path, flag_pattern))
+        findings.extend(self._img_channel_sequential_lsb(path, flag_pattern))
         findings.extend(self._img_appended_data(path, flag_pattern))
         findings.extend(self._img_metadata_stego(path, flag_pattern))
         if depth == "deep":
@@ -425,6 +426,115 @@ class SteganalysisAnalyzer(Analyzer):
                 flag_match=flag_match,
                 confidence=_FLAG_CONF if flag_match else _PRINT_CONF,
             ))
+
+        return findings
+
+    def _img_channel_sequential_lsb(self, path: str, flag_pattern: re.Pattern) -> List[Finding]:
+        """Channel-sequential LSB extraction.
+
+        Unlike the interleaved approach (R0,G0,B0,R1,G1,B1,...), this technique
+        reads *all* LSBs from one channel across the entire image first, then all
+        LSBs from the next channel, and so on.  The three bit-streams are
+        concatenated and reassembled into bytes; a null byte terminates the message.
+
+        All six channel orderings (RGB, RBG, GRB, GBR, BRG, BGR) are tried, plus
+        each single channel (R, G, B) in isolation, to cover every possible
+        embedding strategy.
+        """
+        findings: List[Finding] = []
+        try:
+            from PIL import Image
+            import numpy as np
+        except ImportError:
+            return findings
+        try:
+            img = Image.open(path)
+            arr = np.array(img)
+        except Exception:
+            return findings
+
+        # Need at least three channels (R, G, B)
+        if arr.ndim < 3 or arr.shape[2] < 3:
+            return findings
+
+        pixels = arr.reshape(-1, arr.shape[2])
+
+        # All six tri-channel orderings plus three single-channel orderings
+        orderings = [
+            ("RGB",  [0, 1, 2]),
+            ("RBG",  [0, 2, 1]),
+            ("GRB",  [1, 0, 2]),
+            ("GBR",  [1, 2, 0]),
+            ("BRG",  [2, 0, 1]),
+            ("BGR",  [2, 1, 0]),
+            ("R",    [0]),
+            ("G",    [1]),
+            ("B",    [2]),
+        ]
+
+        seen_results: set = set()
+
+        for order_name, ch_indices in orderings:
+            # Build the bit-stream: all LSBs from channel ch_indices[0], then
+            # all LSBs from ch_indices[1], etc.
+            bits: List[int] = []
+            for ch in ch_indices:
+                if ch >= arr.shape[2]:
+                    continue
+                channel_flat = pixels[:, ch]
+                bits.extend(int(v) & 1 for v in channel_flat)
+
+            if len(bits) < 8:
+                continue
+
+            # Reassemble bytes; stop at the first null byte
+            result = bytearray()
+            stopped = False
+            for i in range(0, len(bits) - 7, 8):
+                byte_val = 0
+                for j in range(8):
+                    byte_val |= bits[i + j] << (7 - j)
+                if byte_val == 0:
+                    stopped = True
+                    break
+                result.append(byte_val)
+
+            if not result:
+                continue
+
+            raw = bytes(result)
+
+            # Deduplicate identical payloads across orderings
+            dedup_key = raw[:256]
+            if dedup_key in seen_results:
+                continue
+            seen_results.add(dedup_key)
+
+            try:
+                text = raw.decode("latin-1")
+            except Exception:
+                text = ""
+
+            try:
+                flag_match = bool(flag_pattern.search(text))
+            except Exception:
+                flag_match = False
+
+            if flag_match or _is_printable(raw):
+                null_note = " (null-terminated)" if stopped else ""
+                detail = (
+                    f"Channel-sequential LSB order={order_name}{null_note}: "
+                    f"{text!r}  hex={raw[:64].hex()}"
+                )
+                findings.append(self._finding(
+                    path,
+                    f"Channel-sequential LSB extraction (order={order_name})",
+                    detail,
+                    severity="HIGH",
+                    offset=0,
+                    flag_match=flag_match,
+                    confidence=_FLAG_CONF if flag_match else _PRINT_CONF,
+                ))
 
         return findings
 
